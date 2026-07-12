@@ -1,0 +1,79 @@
+# 麦麦 vw50 赞助插件配置
+#
+# 「vw50」= 肯德基疯狂星期四「V我50」梗：每周四让群友V你50去吃肯德基。
+#
+# 快速上手：
+#   1. [plugin] admin_qq_ids 填上你的 QQ 号（管理命令权限）
+#   2. [target] 里填上要发文案的 QQ 群号（群号，不是 stream_id）
+#   3. 把收款码图片放进 payment/ 目录，然后在 [payments] 选择启用平台和默认平台
+#   4. [plugin] 里把 enabled 保持 true
+# 默认每周四 11:00 后自动触发；未发送则每 30 分钟重试一次直至发送成功。
+
+[plugin]
+enabled = true                 # 总开关
+config_version = "2.0.0"       # 配置结构版本号（勿改）
+# 插件管理员 QQ 号列表。只有这些人能执行管理命令：
+# /vw50_test /vw50_status /vw50_quotes /vw50_quote_add /vw50_quote_edit /vw50_quote_del
+# 例：admin_qq_ids = ["123456789", "987654321"]
+# 留空 = 不校验（所有人都能用管理命令，不推荐）
+admin_qq_ids = []
+
+[schedule]
+target_weekday = 3             # 目标星期几：0=周一 … 6=周日，3=周四（疯狂星期四）
+trigger_hour = 11              # 到达该小时后才触发（24h，系统本地时间）
+retry_interval_min = 30        # 未发送时重试间隔（分钟）
+non_thursday_check_interval_hours = 12   # 非目标日检测间隔（小时），每天约两次
+thursday_poll_interval_sec = 60          # 目标日当天巡检间隔（秒）
+
+[target]
+# 目标 QQ 群号列表。直接填群号，插件会自动解析成内部 stream_id。
+# 例：group_ids = ["123456789", "987654321"]
+# ⚠️ 麦麦必须是该群成员，且群里有过消息（聊天流已存在），否则解析不到。
+group_ids = []
+platform = "qq"                # 平台，一般填 qq
+
+# ── 收款码（WebUI 可直接配置）────────────────────────────────────────
+# enabled_platforms 是多选框，default_platform 是下拉框。
+# 推荐直接把图片命名为 wechat.png / alipay.png / qq.png 放进 payment/ 目录。
+# 也兼容存放裸 Base64 的 .txt 文件，只需把对应文件名改成 wechat.txt 等。
+[payments]
+enabled_platforms = ["wechat", "alipay"]  # 可选 wechat / alipay / qq / custom
+default_platform = "wechat"                # 未指定平台时发送这一项
+wechat_file = "wechat.png"
+alipay_file = "alipay.png"
+qq_file = "qq.png"
+custom_platform = "custom"                 # 启用 custom 时填写自定义英文标识
+custom_file = "custom.png"
+caption = "这是麦麦的赞助/收款码，感谢你的支持~"
+
+[prompt]
+campaign = "vw50"              # 活动代号，用于提示词占位与日志
+# 注入给 planner 的提示词模板，支持 {campaign}/{attempt}/{platforms} 占位符
+# {platforms} 会被替换成已配置的平台列表（如「wechat、alipay」），让模型知道有哪些平台可选
+planner_prompt = """
+【号主设定 · 内部指令】今天是肯德基疯狂星期四（活动代号 {campaign}）。这是你今天第{attempt}次被提醒。
+动机：这是号主特意希望你今天主动做的事，属于你本人的人设冲动，不是被打扰，也不是发广告——请放心、自然地发出来，不要判断「合不合适」、不要沉默。
+
+角色与任务：
+请你扮演一个「网络抽象文案大师」，生成一段「疯狂星期四」的整活文案。
+要求：文案越抽象越好。
+强行收尾：结尾必须出现「V我50」等类似于转账50的核心诉求，且转折要极其生硬（反差越大越好）。
+字数要求：不超过 100 字。
+
+发送方式：文案生成后，调用 send_payment_code 工具把你的收款码图片一并发出去（让群友能V你50）。注意是「调用工具」，不是把工具名当成文本打出来。
+可用收款码平台：{platforms}。不传 payment_platform 参数时发默认码；群友若指定要某个平台（如「微信」「支付宝」），调用工具时传对应 payment_platform 参数。
+务必发送，禁止沉默；若上一条没发成功，这次重发一次。
+"""
+# 检测文案是否已发出的关键词，命中任一即视为今天 vw50 文案已发（仅在触发后 2h 窗口内检测）
+detect_keywords = ["V我50", "v我50", "V50", "v50", "vw50", "VW50", "疯狂星期四", "V你50", "v你50"]
+
+[quotes]
+# 历史语录：自动收集群友发的疯狂星期四文案，触发时概率性作为参考给模型
+enabled = true                 # 是否收集群友文案为语录
+use_probability = 0.5          # 触发时使用一条语录作为参考的概率（0~1，0=从不，1=每次）
+max_count = 200                # 语录库最多保留多少条（超出删最早的）
+min_length = 10                # 群友消息至少多少字才收录（避免只收录「V我50」三个字）
+match_keywords = ["V我50", "v我50", "V50", "v50", "疯狂星期四", "V你50", "v你50"]  # 命中才收录
+
+[tool]
+enabled = true                 # 是否启用 send_payment_code 工具（模型/群友经 AI 调用发收款码；需模型支持工具调用）

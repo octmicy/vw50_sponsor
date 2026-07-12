@@ -1,0 +1,36 @@
+{
+  "manifest_version": 2,
+  "id": "com.octmicy.vw50",
+  "name": "麦麦vw50",
+  "version": "2.0.1",
+  "description": "肯德基疯狂星期四「V我50」梗：每周四 11:00 后自动让麦麦生成 V我50 文案并附上收款码；未发送则每 30 分钟提醒一次直至发送；并提供 send_payment_code 工具供群友主动索要收款码。目标群只需填 QQ 群号。",
+  "author": {
+    "name": "octmicy",
+    "url": "https://github.com/octmicy"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/octmicy/vw50_sponsor"
+  },
+  "host_application": {
+    "min_version": "1.0.0",
+    "max_version": "1.99.99"
+  },
+  "sdk": {
+    "min_version": "2.5.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "plugin_type": "tool",
+  "capabilities": [
+    "send.text",
+    "send.image",
+    "send.hybrid",
+    "maisaka.proactive.trigger",
+    "chat.get_stream_by_group_id"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": ["zh-CN", "en-US"]
+  }
+}
