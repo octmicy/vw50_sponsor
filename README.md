@@ -97,7 +97,8 @@ caption = "这是麦麦的赞助/收款码，感谢你的支持~"
   └─ 目标日 ≥ 11:00 -> 对每个目标群：
        1.群号 -> stream_id 解析（带缓存）
        2.武装 + maisaka.proactive.trigger(stream_id, intent="vw50_sponsor", reason)
-       3.planner.before_request Hook：session_id 匹配且在窗口内 -> 向 messages 前置 system 提示词
+       3.planner.before_request Hook：session_id 匹配且在窗口内 -> 注入 system 提示词
+         （MaiBot 1.2.0+ 走 Context Items；旧版主程序回退为 messages 前置）
          （「网络抽象文案大师」角色与任务 + 调工具发码要求 + 可选历史语录参考）
        4.replyer.before_request Hook：仅对紧随其后的首个 replyer 请求追加文案要求与工具提醒
        5.麦麦生成文案 + 调用 send_payment_code 工具发送收款码

@@ -16,7 +16,8 @@
   - 目标群只需填 QQ 群号，插件用 chat.get_stream_by_group_id 自动解析成 stream_id。
 
 调度采用后台 asyncio 任务；上下文注入通过 maisaka.planner.before_request
-向 messages 前置 system 消息；replyer.before_request 走 extra_prompt 追加要求。
+注入 Context Items（MaiBot 1.2.0+ 的 Item-first 契约；旧版主程序回退为向
+messages 前置 system 消息）；replyer.before_request 走 extra_prompt 追加要求。
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ import math
 import os
 import random
 import time
+import uuid
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, ClassVar, Iterable, Optional
@@ -727,12 +729,61 @@ class Vw50SponsorPlugin(MaiBotPlugin):
 
     # ── Hook：向 planner 注入 vw50 提示词 ────────────────────────────
 
+    @staticmethod
+    def _build_planner_system_item(text: str) -> dict[str, Any]:
+        """构造一个最小合法的主程序 SystemMessageItem 快照（Item-first 契约）。
+
+        字段必须与主程序 `deserialize_context_item_snapshot` 的校验一致：
+          - `item_type` 固定为 SystemMessageItem；
+          - `meta.item_id` 非空，且不得与本次请求已有 Item 重复；
+          - `meta.logical_turn_id` 键必须存在（取值可为 null）；
+          - `meta.timestamp` 必须是合法 ISO 时间字符串；
+          - `parts` 为内容片段列表，文本片段形如 {"type": "text", "text": ...}。
+        """
+        return {
+            "item_type": "SystemMessageItem",
+            "meta": {
+                "item_id": f"vw50-{uuid.uuid4().hex}",
+                "logical_turn_id": None,
+                "timestamp": datetime.now().isoformat(),
+            },
+            "parts": [{"type": "text", "text": text}],
+        }
+
+    def _inject_planner_prompt_into_items(self, items: list[Any], prompt: str) -> None:
+        """把 planner 提示词注入主程序下发的 Context Items（就地修改）。
+
+        优先把文本并入最后一条 SystemMessageItem 的最后一个文本片段：这样不会新增
+        system 消息、也不会让单条消息从「字符串 content」变成「多段 content 列表」，
+        对只接受字符串 system content 的 Provider 更安全。没有 SystemMessageItem 时
+        在列表最前面插入一个新的。
+        """
+        for item in reversed(items):
+            if not isinstance(item, dict) or item.get("item_type") != "SystemMessageItem":
+                continue
+            parts = item.get("parts")
+            if not isinstance(parts, list) or not parts:
+                continue
+            last_part = parts[-1]
+            if isinstance(last_part, dict) and str(last_part.get("type") or "") == "text":
+                last_part["text"] = f"{last_part.get('text') or ''}\n\n{prompt}"
+            else:
+                parts.append({"type": "text", "text": prompt})
+            return
+        items.insert(0, self._build_planner_system_item(prompt))
+
     @HookHandler("maisaka.planner.before_request", mode=HookMode.BLOCKING)
     async def on_planner_before_request(self, **kwargs: Any) -> Optional[dict[str, Any]]:
-        """当本插件已武装、且 planner 请求属于目标流且在窗口内时，前置一条 system 提示词。
+        """当本插件已武装、且 planner 请求属于目标流且在窗口内时，注入一条 system 提示词。
 
         注入一次后解除武装，避免对同一流的后续普通 planner 请求重复注入；
         下一次 30 分钟重试会重新武装。
+
+        Hook 契约随主程序版本变化，这里按 kwargs 里实际存在的键双兼容：
+          - MaiBot 1.2.0+（Item-first）：提供 `items`（Context Item 列表）+
+            `item_schema_version` + `session_id`，不再有 `messages`；
+          - 旧版主程序：提供 `messages`（{"role", "content"} 列表）。
+        若按固定键取值，主程序升级后注入会静默失效。
         """
         session_id = str(kwargs.get("session_id") or "")
         armed = self._armed.get(session_id)
@@ -750,11 +801,23 @@ class Vw50SponsorPlugin(MaiBotPlugin):
             return {"action": "continue"}
 
         prompt = self._build_planner_prompt(settings, armed_attempt) + quote_ref
-        messages = kwargs.get("messages")
-        if not isinstance(messages, list):
-            self.ctx.logger.warning(f"[vw50] planner messages 类型异常，保留武装等待下一次 stream={session_id}")
+
+        items = kwargs.get("items")
+        if isinstance(items, list):
+            # 新版主程序（MaiBot 1.2.0+）：注入 Context Items
+            self._inject_planner_prompt_into_items(items, prompt)
+        elif isinstance(kwargs.get("messages"), list):
+            # 旧版主程序：前置一条 system 消息
+            kwargs["messages"] = [
+                {"role": "system", "content": prompt},
+                *kwargs["messages"],
+            ]
+        else:
+            # 既无 items 也无 messages：不消费武装，保留到下一次请求
+            self.ctx.logger.warning(
+                f"[vw50] planner Hook 未提供 items/messages，保留武装等待下一次 stream={session_id}"
+            )
             return {"action": "continue"}
-        kwargs["messages"] = [{"role": "system", "content": prompt}, *messages]
 
         # 解除武装：本次注入只生效一次
         self._armed.pop(session_id, None)

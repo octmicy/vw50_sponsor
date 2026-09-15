@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.0.2] - 2026-09-16
+
+### 修复
+- 适配 MaiBot 1.2.0 的 Item-first 上下文契约：`maisaka.planner.before_request` 的入参已由 `messages` 改为 `items`（Context Item 列表）+ `item_schema_version`，插件原先按 `messages` 前置 system 消息的注入方式会静默失效（只打一条 warning，提示词永远进不去，导致周四定时任务里 planner/replyer 收不到「网络抽象文案大师」指令）。
+- planner 提示词改为注入 Context Items：优先并入最后一条 `SystemMessageItem` 的最后一个文本片段（不新增 system 消息、不把字符串 content 变成多段 content 列表）；没有 system item 时在列表最前面插入一条新的 `SystemMessageItem`。
+- 保留旧版 `messages` 回退分支，按 kwargs 里实际存在的键判断走哪条路，新旧主程序双兼容。
+- 注入失败（既无 `items` 也无 `messages`）时不消费 Hook 武装，保留到下一次 planner 请求，避免白白错过一次注入机会。
+
+### 说明
+- 除 planner 注入外，其余 Hook 与能力经核对在新版主程序/SDK 下契约未变：`maisaka.replyer.before_request` 仍有 `extra_prompt`；`send_service.after_send`（`message` + `sent`）、`chat.receive.before_process`（`message`）不变；`send.text/image/hybrid`、`maisaka.proactive.trigger`、`chat.get_stream_by_group_id`、`@Tool` 返回值（`{content}`）与 `@Command` 三元组均不变。
+- SDK 2.8.0 → 2.8.1 为版本号变更，源码内容一致，不构成破坏性变更。
+
 ## [2.0.1] - 2026-07-11
 
 ### 修复
