@@ -2,7 +2,7 @@
 
 作者：octmicy
 
-「vw50」= 肯德基疯狂星期四「V我50」梗。每周四 11:00 后，自动让麦麦生成一条抽象无厘头的「疯狂星期四 V我50」文案，并要求它自己调用 `send_payment_code` 工具把收款码发给群友；若没发，每 30 分钟提醒一次直至发送成功。还可自动收集群友发的疯狂星期四文案作为历史语录，触发时概率性参考。
+「vw50」= 肯德基疯狂星期四「V我50」梗。每周四 11:00 后，自动让麦麦生成一条抽象无厘头的「疯狂星期四 V我50」文案，并要求它自己调用 `send_payment_code` 工具把收款码发给群友；若没发，每 30 分钟提醒一次直至发送成功。另外支持管理员用指令录入群友赞助，让麦麦公开感谢。
 
 注意：若收款码被受限此插件概不负责
 
@@ -12,7 +12,7 @@
 - **角色化提示词**：planner + replyer 双 Hook 注入「网络抽象文案大师」角色与任务；要求越抽象越好、结尾必须出现「V我50」、转折要极其生硬（反差越大越好）、字数不超过 100 字。
 - **模型自调工具发码**：自动流程完全依赖模型自己调 `send_payment_code`（需模型支持工具调用）。
 - **发送检测与重试**：触发后 2h 窗口内，出站消息命中 `detect_keywords` 即视为当天 vw50 文案已发；收款码工具调用不作为完成信号。未发送则每 30 分钟（可配置）重试一次。
-- **历史语录**：自动收集群友发的疯狂星期四文案存进语录库；触发时按概率随机取一条作为参考给模型（可借鉴改写或原样发出）。
+- **赞助录入**：管理员发送 `/vw50 金额 @成员` 记录一次赞助（同一人多次累加），麦麦会在当前会话公开感谢该赞助者。
 - **上下文感知**：每次提醒带上「这是今天第 N 次」的上下文；状态持久化到 `vw50_state.json`，重启不丢失。
 - **非目标日静默**：其余时间每天低频巡检两次是否到了目标日，非周四插件静默不发消息。
 - **只需填群号**：目标群填 QQ 群号即可，插件自动解析成内部 stream_id，无需手动查 stream_id。
@@ -22,7 +22,8 @@
 
 ## 安装
 
-把整个 `vw50_sponsor` 文件夹放到 MaiBot 的插件目录（通常为 `MaiBot/data/plugins/`），重启 MaiBot 或在 WebUI 重载插件即可。
+把整个 `vw50_sponsor` 文件夹放到 MaiBot 的插件目录 `<模块根>/plugins/vw50_sponsor/`（Windows OneKey 版为
+`%APPDATA%\MaiBotOneKeyDesktop\<实例哈希>\modules\MaiBot\plugins\`），重启 MaiBot 或在 WebUI 重载插件即可。
 
 ## 配置
 
@@ -34,7 +35,7 @@
    - planner/replyer 会看到已配置的平台列表，群友指定某个平台时模型可传对应 `payment_platform` 参数。
 4. **总开关**：`[plugin] enabled = true`。
 
-其余参数（目标星期、触发时辰、重试间隔、提示词模板、语录等）均有合理默认值，按需调整。
+其余参数（目标星期、触发时辰、重试间隔、提示词模板、赞助录入等）均有合理默认值，按需调整。
 
 ### 关键配置项说明
 
@@ -50,9 +51,11 @@
 | `payments.default_platform` | `wechat` | WebUI 下拉框：未指定平台时发送哪个收款码 |
 | `payments.*_file` | `*.png` | 对应平台的图片或 Base64 文本文件名，默认从 `payment/` 目录读取 |
 | `payments.caption` | 见 config.toml | 所有平台共用的收款码附带文案，留空则只发图片 |
-| `quotes.enabled` | `true` | 是否收集群友文案为语录 |
-| `quotes.use_probability` | `0.5` | 触发时参考一条语录的概率 |
-| `quotes.match_keywords` | `["V我50","疯狂星期四",...]` | 群友消息命中才收录 |
+| `sponsor.enabled` | `true` | 是否启用 `/vw50 金额 @成员` 赞助录入 |
+| `sponsor.max_amount` | `100000` | 单次赞助金额上限（元） |
+| `sponsor.group_only` | `false` | 是否仅允许群聊录入 |
+| `sponsor.thanks_ttl_sec` | `120` | 感谢注入有效期（秒） |
+| `sponsor.repeat_trigger_interval_sec` | `60` | 同一人重复录入的最小发言间隔（秒） |
 | `tool.enabled` | `true` | 收款码工具开关（需模型支持工具调用） |
 
 ### 关于群号解析
@@ -99,41 +102,50 @@ caption = "这是麦麦的赞助/收款码，感谢你的支持~"
        2.武装 + maisaka.proactive.trigger(stream_id, intent="vw50_sponsor", reason)
        3.planner.before_request Hook：session_id 匹配且在窗口内 -> 注入 system 提示词
          （MaiBot 1.2.0+ 走 Context Items；旧版主程序回退为 messages 前置）
-         （「网络抽象文案大师」角色与任务 + 调工具发码要求 + 可选历史语录参考）
+         （「网络抽象文案大师」角色与任务 + 调工具发码要求）
        4.replyer.before_request Hook：仅对紧随其后的首个 replyer 请求追加文案要求与工具提醒
        5.麦麦生成文案 + 调用 send_payment_code 工具发送收款码
        6.send_service.after_send 确认消息发送成功且命中文案关键词后，标记当天完成
        7.文案未成功发送则 30 分钟后重试；收款码工具调用不影响文案完成判定
 ```
 
-## 历史语录
+## 赞助录入
 
-- 插件通过 `chat.receive.before_process` Hook 监听群消息，命中 `quotes.match_keywords` 且字数 ≥ `quotes.min_length` 的，自动收录到 `vw50_quotes.json`。
-- 触发 vw50 时，按 `quotes.use_probability` 概率随机取一条语录，拼到 planner 提示词里作为参考（模型可借鉴改写，也可原样发出）。
-- 语录库超 `quotes.max_count` 自动删最早的。
-- **管理命令**（可在群里直接操作）：
-  - `/vw50_quotes` 查看列表（带序号、分页）
-  - `/vw50_quote_add 今天是疯狂星期四，V我50` 添加
-  - `/vw50_quote_edit 3 新文案内容` 修改第 3 条
-  - `/vw50_quote_del 3` 删除第 3 条
-  - 也可直接编辑插件目录下的 `vw50_quotes.json`。
+管理员在群里（或私聊）发送：
+
+```
+/vw50 50 @群友甲
+```
+
+执行过程：
+
+1. 校验管理员身份、金额（`0 < 金额 ≤ sponsor.max_amount`）与 @ 目标；
+2. 追加一条赞助明细（同一人多次赞助会累加，不覆盖）；
+3. **拦截该消息**，不进入 AI 处理链；
+4. 挂一个有效期为 `sponsor.thanks_ttl_sec` 的"待感谢"状态；
+5. 调 `maisaka.proactive.trigger` 把这一轮推到 planner 发言；
+6. 麦麦生成回复时，`replyer.before_request` 把**强硬的感谢要求**追加进 `extra_prompt`；
+7. 消息发出成功后清理待感谢状态（replyer 重试期间会一直保留要求）。
+
+说明：
+
+- 感谢话术由 replyer 生成，模板见 `[sponsor] prompt_template`，支持 `{name}`/`{amount}`/`{times}`/`{total}`。
+- 不要求模型写 @：replyer 的输出会被主程序当作纯文本发送，写 @ 也不会变成真实提及。
+- 同一人 `sponsor.repeat_trigger_interval_sec` 秒内重复录入，只记明细不再触发发言，避免连刷。
+- 赞助明细保存在统一持久化目录的 `vw50_sponsors.json`（见下）。
 
 ## 调试命令
 
 | 命令 | 作用 |
 |------|------|
-| `/vw50_test` | 在当前群/会话手动触发一次流程（忽略日期/时间限制） |
-| `/vw50_status` | 查看插件当日状态（含语录库条数） |
-| `/vw50_quotes [页码]` | 查看语录库（分页，每页 10 条，带序号） |
-| `/vw50_quote_add <文案>` | 手动添加一条语录 |
-| `/vw50_quote_edit <序号> <新文案>` | 修改指定序号的语录 |
-| `/vw50_quote_del <序号>` | 删除指定序号的语录 |
+| `/vw50 <金额> @成员` | 录入一次赞助并让麦麦公开感谢 |
+| `/vw50_test` | 在当前群/会话手动触发一次周四流程（忽略日期/时间限制） |
+| `/vw50_status` | 查看插件当日状态（含赞助记录条数） |
 
 > 以上管理命令均需在 `plugin.admin_qq_ids` 里配置的 QQ 号才能使用；非管理员会提示无权。
+> **管理员列表为空时，赞助录入与其它管理命令一律拒绝**（fail-closed）。
 >
 > `/vw50_test` 在命令所在的会话里触发，不需要该群在 `group_ids` 里，方便随时测试。
->
-> 语录库文件：插件目录下的 `vw50_quotes.json`。群友发的「疯狂星期四/V我50」文案会自动收录；也可用上面命令手动管理。
 
 ## 注意事项
 
@@ -141,7 +153,8 @@ caption = "这是麦麦的赞助/收款码，感谢你的支持~"
 - **不要把 Base64 直接填进 config 或 WebUI**。推荐把图片放进 `payment/`；若使用 Base64，则放在独立 `.txt` 文件中，插件会自动清洗内容。
 - 自动流程完全依赖模型调工具发码；若模型调不动（如弱模型把工具名当文本输出），需升级模型或换强模型，插件不做兜底。
 - `send_payment_code` 工具可在任何时候调用：不传 `payment_platform` 发默认码，传 `wechat`/`alipay` 等发对应平台码。
-- 状态文件 `vw50_state.json`、语录文件 `vw50_quotes.json` 都在插件目录下，可手动删除/编辑以重置。
+- 状态文件 `vw50_state.json`、赞助明细 `vw50_sponsors.json` 保存在统一持久化目录
+  `<模块根>/data/plugins/<插件 id>/`（运行时即 `ctx.paths.data_dir`）；旧版本放在插件目录的文件会在首次读写时自动复制过去。
 
 ## 依赖
 

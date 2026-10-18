@@ -6,7 +6,7 @@
   [target]    目标 QQ 群号列表
   [payments]  WebUI 多平台收款码选择、文件名与附带文案
   [prompt]    注入给 planner 的提示词模板
-  [quotes]    历史语录收集与参考
+  [sponsor]   赞助录入（/vw50 金额 @成员）与感谢注入
   [tool]      send_payment_code 工具开关
 """
 
@@ -47,6 +47,29 @@ DEFAULT_DETECT_KEYWORDS = [
 ]
 
 
+# 注入给 replyer 的"感谢赞助"要求。支持 {name}/{amount}/{times}/{total} 占位符。
+# 说明：replyer 的输出会被主程序整体当作纯文本发送，写 @ 不会变成真实提及，
+# 所以这里不要求模型输出 @，只要求"公开感谢"。
+DEFAULT_SPONSOR_PROMPT = (
+    "【本轮最高优先级 · 必须执行 · 不得省略】\n"
+    "群友「{name}」刚刚真实赞助了你 {amount} 元（累计第 {times} 次 / 共 {total} 元）。\n"
+    "号主已确认到账，并要求你在这条回复里公开感谢他。\n\n"
+    "硬性要求：\n"
+    "1. 这条回复必须是感谢，不许答非所问、不许敷衍、不许只发表情；\n"
+    "2. 语气真诚、符合你平时的人设，不要客服腔；可以带一点「V我50」的梗，但感谢是主体；\n"
+    "3. 只发一次，不要重复刷屏；不要输出括号说明、动作描写或解释。"
+)
+
+
+# proactive.trigger 的 intent：会作为 <plugin_proactive_task> 进入 chat_history，
+# planner 与 replyer 都能看到，用来把这一轮"推到发言"。
+DEFAULT_SPONSOR_INTENT = (
+    "号主刚刚用管理指令录入了群友「{name}」赞助 {amount} 元（累计第 {times} 次）。"
+    "这是一次真实的赞助，需要你现在公开感谢他。请立刻决定发言并调用 reply，"
+    "不要 no_reply，不要等待更合适的时机。"
+)
+
+
 class PluginOptions(PluginConfigBase):
     """插件总开关与配置版本。"""
 
@@ -60,7 +83,7 @@ class PluginOptions(PluginConfigBase):
     )
     admin_qq_ids: List[str] = Field(
         default_factory=list,
-        description="插件管理员 QQ 号列表。只有这些人能执行管理命令（语录增删改查、测试、状态）。",
+        description="插件管理员 QQ 号列表。只有这些人能执行管理命令（赞助录入、测试、状态）。",
         json_schema_extra={
             "label": "管理员 QQ 号",
             "hint": "填 QQ 号，如 [\"123456789\"]。留空则所有人都能执行管理命令（不推荐）。",
@@ -311,40 +334,49 @@ class PromptConfig(PluginConfigBase):
     )
 
 
-class QuotesConfig(PluginConfigBase):
-    """历史语录：收集群友发的疯狂星期四文案，触发时概率性作为参考。"""
+class SponsorConfig(PluginConfigBase):
+    """赞助录入：/vw50 金额 @成员，把感谢要求注入 replyer。"""
 
-    __ui_label__: ClassVar[str] = "历史语录"
+    __ui_label__: ClassVar[str] = "赞助录入"
     __ui_order__: ClassVar[int] = 5
 
     enabled: bool = Field(
         default=True,
-        description="是否收集群友的疯狂星期四文案作为历史语录。",
-        json_schema_extra={"label": "启用语录收集", "order": 0},
+        description="是否启用 /vw50 赞助录入指令。",
+        json_schema_extra={"label": "启用赞助录入", "order": 0},
     )
-    use_probability: float = Field(
-        default=0.5,
-        ge=0.0,
-        le=1.0,
-        description="触发时选取一条历史语录作为参考的概率（0~1）。",
-        json_schema_extra={"label": "使用概率", "hint": "0=从不参考，1=每次都参考。参考语录可借鉴风格/改写或原样发出。", "order": 1, "step": 0.1},
+    max_amount: float = Field(
+        default=100000.0,
+        gt=0,
+        description="单次赞助金额上限（元），超过则拒绝录入。",
+        json_schema_extra={"label": "金额上限（元）", "order": 1, "step": 1},
     )
-    max_count: int = Field(
-        default=200,
-        ge=1,
-        description="语录库最多保留多少条（超出删最早的）。",
-        json_schema_extra={"label": "最大条数", "order": 2, "step": 1},
+    group_only: bool = Field(
+        default=False,
+        description="是否仅允许在群聊中录入。开启后私聊会被拒绝。",
+        json_schema_extra={"label": "仅限群聊", "order": 2},
     )
-    min_length: int = Field(
-        default=10,
-        ge=1,
-        description="群友消息至少多少字才收录为语录（避免只收录「V我50」三个字）。",
-        json_schema_extra={"label": "最小字数", "order": 3, "step": 1},
+    thanks_ttl_sec: float = Field(
+        default=120.0,
+        gt=0,
+        description="感谢注入的有效期（秒）。超时未发出则作废。",
+        json_schema_extra={"label": "感谢注入有效期（秒）", "order": 3, "step": 1},
     )
-    match_keywords: List[str] = Field(
-        default_factory=lambda: ["V我50", "v我50", "V50", "v50", "疯狂星期四", "V你50", "v你50"],
-        description="群友消息命中这些关键词才收录为语录。",
-        json_schema_extra={"label": "收录关键词", "order": 4},
+    repeat_trigger_interval_sec: float = Field(
+        default=60.0,
+        ge=0,
+        description="同一人重复录入时，距离上次触发发言不足该秒数则只记明细、不再触发发言。",
+        json_schema_extra={"label": "重复录入发言间隔（秒）", "hint": "避免同一人连刷导致连续感谢刷屏；0=每次都触发。", "order": 4, "step": 1},
+    )
+    prompt_template: str = Field(
+        default=DEFAULT_SPONSOR_PROMPT,
+        description="注入给 replyer 的感谢要求模板，支持 {name}/{amount}/{times}/{total} 占位符。",
+        json_schema_extra={"label": "Replyer 感谢提示词", "input_type": "textarea", "order": 5},
+    )
+    intent_template: str = Field(
+        default=DEFAULT_SPONSOR_INTENT,
+        description="proactive.trigger 的 intent 模板，支持 {name}/{amount}/{times}/{total} 占位符。",
+        json_schema_extra={"label": "主动触发 intent", "input_type": "textarea", "order": 6},
     )
 
 
@@ -369,5 +401,5 @@ class Vw50Settings(PluginConfigBase):
     target: TargetConfig = Field(default_factory=TargetConfig)
     payments: PaymentCodesSection = Field(default_factory=PaymentCodesSection)
     prompt: PromptConfig = Field(default_factory=PromptConfig)
-    quotes: QuotesConfig = Field(default_factory=QuotesConfig)
+    sponsor: SponsorConfig = Field(default_factory=SponsorConfig)
     tool: ToolConfig = Field(default_factory=ToolConfig)

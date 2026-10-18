@@ -13,9 +13,8 @@
 enabled = true                 # 总开关
 config_version = "2.0.0"       # 配置结构版本号（勿改）
 # 插件管理员 QQ 号列表。只有这些人能执行管理命令：
-# /vw50_test /vw50_status /vw50_quotes /vw50_quote_add /vw50_quote_edit /vw50_quote_del
-# 例：admin_qq_ids = ["123456789", "987654321"]
-# 留空 = 不校验（所有人都能用管理命令，不推荐）
+# /vw50 <金额> @成员（录入赞助） /vw50_test /vw50_status
+# 留空 = 管理命令一律拒绝（fail-closed，必须先配置）
 admin_qq_ids = []
 
 [schedule]
@@ -67,13 +66,29 @@ planner_prompt = """
 # 检测文案是否已发出的关键词，命中任一即视为今天 vw50 文案已发（仅在触发后 2h 窗口内检测）
 detect_keywords = ["V我50", "v我50", "V50", "v50", "vw50", "VW50", "疯狂星期四", "V你50", "v你50"]
 
-[quotes]
-# 历史语录：自动收集群友发的疯狂星期四文案，触发时概率性作为参考给模型
-enabled = true                 # 是否收集群友文案为语录
-use_probability = 0.5          # 触发时使用一条语录作为参考的概率（0~1，0=从不，1=每次）
-max_count = 200                # 语录库最多保留多少条（超出删最早的）
-min_length = 10                # 群友消息至少多少字才收录（避免只收录「V我50」三个字）
-match_keywords = ["V我50", "v我50", "V50", "v50", "疯狂星期四", "V你50", "v你50"]  # 命中才收录
+[sponsor]
+# 赞助录入：管理员发送「/vw50 金额 @成员」记录一次赞助，并让麦麦公开感谢。
+# 仅插件管理员（[plugin] admin_qq_ids）可用；管理员为空时一律拒绝。
+enabled = true                 # 是否启用该指令
+max_amount = 100000.0          # 单次金额上限（元）
+group_only = false             # 是否仅限群聊录入
+thanks_ttl_sec = 120.0         # 感谢注入有效期（秒），超时未发出则作废
+repeat_trigger_interval_sec = 60.0  # 同一人重复录入时，距上次触发不足该秒数则只记明细
+# 注入给 replyer 的感谢要求，支持 {name}/{amount}/{times}/{total}
+prompt_template = """
+【本轮最高优先级 · 必须执行 · 不得省略】
+群友「{name}」刚刚真实赞助了你 {amount} 元（累计第 {times} 次 / 共 {total} 元）。
+号主已确认到账，并要求你在这条回复里公开感谢他。
+
+硬性要求：
+1. 这条回复必须是感谢，不许答非所问、不许敷衍、不许只发表情；
+2. 语气真诚、符合你平时的人设，不要客服腔；可以带一点「V我50」的梗，但感谢是主体；
+3. 只发一次，不要重复刷屏；不要输出括号说明、动作描写或解释。
+"""
+# proactive.trigger 的 intent，支持 {name}/{amount}/{times}/{total}
+intent_template = """
+号主刚刚用管理指令录入了群友「{name}」赞助 {amount} 元（累计第 {times} 次）。这是一次真实的赞助，需要你现在公开感谢他。请立刻决定发言并调用 reply，不要 no_reply，不要等待更合适的时机。
+"""
 
 [tool]
 enabled = true                 # 是否启用 send_payment_code 工具（模型/群友经 AI 调用发收款码；需模型支持工具调用）

@@ -1,5 +1,33 @@
 # Changelog
 
+## [2.1.0] - 2026-10-18
+
+### 新增
+- **赞助录入指令** `/vw50 金额 @成员`（仅插件管理员）：录入一次群友赞助，并让麦麦在当前会话公开感谢。
+  - @ 目标自动从消息的 at 段解析（`data.target_user_id`，显示名按 群名片 → 昵称 → QQ号 兜底），无需手打名字。
+  - 金额校验：`0 < 金额 ≤ sponsor.max_amount`（默认 100000），支持两位小数。
+  - 命令拦截消息（`intercept_message_level=2`），不进入 AI 处理链。
+  - 同一人多次赞助**按明细累加**，话术里会带上「累计第 N 次 / 共 X 元」。
+  - 同一人 `sponsor.repeat_trigger_interval_sec`（默认 60s）内重复录入只记明细、不再触发发言。
+  - 感谢要求注入 **replyer** 的 `extra_prompt`（真正生成文案的组件），并通过
+    `maisaka.proactive.trigger` 把这一轮推到 planner 发言；待感谢状态在发送成功或
+    `sponsor.thanks_ttl_sec`（默认 120s）到期后清理，replyer 重试期间仍保留要求。
+  - 管理员列表为空时赞助录入一律拒绝（fail-closed）。
+
+### 移除
+- **删除历史语录功能**：不再通过 `chat.receive.before_process` 采集群友文案，不再在触发时概率性参考语录。
+  连带移除 `quotes` 配置节、`vw50_quotes.json`、`/vw50_quotes` / `/vw50_quote_add` / `/vw50_quote_edit` / `/vw50_quote_del` 四条命令。
+  插件从此不再读取任何群聊正文。
+
+### 变更
+- 运行数据改存统一持久化目录 `<模块根>/data/plugins/com.octmicy.vw50/`（`ctx.paths.data_dir`），
+  旧版放在插件目录的 `vw50_state.json` 会在首次读写时自动复制过去；拿不到 `ctx.paths` 时回落插件目录。
+- `.gitignore` 排除 `vw50_state.json` / `vw50_sponsors.json` / `vw50_quotes.json`，避免群友 QQ 号与聊天原文误提交。
+
+### 说明
+- 感谢话术不要求模型写 `@`：replyer 的输出会被主程序整体当作纯文本发送，写 `@` 不会变成真实提及。
+- 周四自动流程与赞助感谢互不干扰：前者走一次性 `_replyer_armed`，后者走独立的待感谢队列。
+
 ## [2.0.2] - 2026-09-16
 
 ### 修复

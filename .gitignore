@@ -1,3 +1,8 @@
 __pycache__/
 *.py[cod]
+logs/
 
+# 运行期数据：可能包含群友 QQ 号与聊天原文，禁止提交
+vw50_state.json
+vw50_sponsors.json
+vw50_quotes.json

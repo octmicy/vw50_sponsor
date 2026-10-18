@@ -9,15 +9,18 @@
     收款码工具可随时调用，不作为完成判定、不抑制周四自动触发。
   - 未发送则每 30 分钟（可配置）重试一次，直至文案已发。
   - 非目标日每天低频巡检两次是否到了目标日，非目标日静默。
-  - 历史语录：自动收集群友的疯狂星期四文案，触发时概率性作为参考。
+  - 赞助录入：管理员发送「/vw50 金额 @成员」记录一次赞助（同一人多次累加），
+    并让麦麦在当前会话公开感谢该赞助者。
   - 提供 send_payment_code 工具：支持多平台（wechat/alipay/qq 等），可选 payment_platform 参数；
     不传则发送 WebUI 中选择的默认平台收款码。
   - 收款码通过 WebUI 多选平台、下拉默认项并填写文件名；旧版 [[payments.codes]] 仍兼容。
   - 目标群只需填 QQ 群号，插件用 chat.get_stream_by_group_id 自动解析成 stream_id。
 
-调度采用后台 asyncio 任务；上下文注入通过 maisaka.planner.before_request
+调度采用后台 asyncio 任务；周四流程的上下文注入通过 maisaka.planner.before_request
 注入 Context Items（MaiBot 1.2.0+ 的 Item-first 契约；旧版主程序回退为向
-messages 前置 system 消息）；replyer.before_request 走 extra_prompt 追加要求。
+messages 前置 system 消息），文案要求走 replyer.before_request 的 extra_prompt。
+赞助感谢的注入点在 replyer.before_request（真正写文案的组件），配合
+maisaka.proactive.trigger 把这一轮推到 planner 发言。
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ import base64
 import json
 import math
 import os
-import random
+import shutil
 import time
 import uuid
 from datetime import datetime
@@ -53,6 +56,7 @@ class Vw50SponsorPlugin(MaiBotPlugin):
     config_reload_subscriptions: ClassVar[Iterable[str]] = ()
 
     STATE_FILE = "vw50_state.json"
+    SPONSORS_FILE = "vw50_sponsors.json"
     # planner.before_request 注入的有效窗口（秒）：仅在此窗口内、且 session_id 匹配才注入
     _ARM_WINDOW_SEC = 120.0
     # 触发后文案检测的有效窗口（秒）：仅在此窗口内、且群内命中「V我50/疯狂星期四」相关关键词，
@@ -65,14 +69,16 @@ class Vw50SponsorPlugin(MaiBotPlugin):
         super().__init__()
         # 后台调度任务句柄
         self._scheduler_task: Optional[asyncio.Task[None]] = None
-        # planner 注入用的「已武装」状态：stream_id -> (触发时间戳, attempt, 参考语录)
+        # planner 注入用的「已武装」状态：stream_id -> (触发时间戳, attempt)
         # 本次主动触发后，下一个匹配该流的 planner 请求才注入；多流可同时武装
-        self._armed: dict[str, tuple[float, int, str]] = {}
+        self._armed: dict[str, tuple[float, int]] = {}
         # 文案检测窗口：stream_id -> 检测有效截止时间戳。仅在触发后一段时间内，
         # 该流命中「V我50/疯狂星期四」相关关键词才视为 vw50 自动流程完成
         self._detect_until: dict[str, float] = {}
         # replyer 注入是一次性的，只允许紧随 planner 注入后的首个匹配请求使用
         self._replyer_armed: dict[str, float] = {}
+        # 赞助感谢：stream_id -> 本轮待感谢的赞助信息（发出成功后清理）
+        self._sponsor_pending: dict[str, dict[str, Any]] = {}
         # 收款码工具节流：stream_id -> 上次发送时间戳（避免群友反复点导致刷屏）
         self._tool_last_sent: dict[str, float] = {}
         # group_id -> stream_id 解析缓存，避免每个巡检周期都发起 RPC 查询
@@ -102,8 +108,39 @@ class Vw50SponsorPlugin(MaiBotPlugin):
 
     # ── 状态持久化 ────────────────────────────────────────────────────
 
+    def _data_dir(self) -> str:
+        """返回插件统一持久化目录。
+
+        优先用 SDK 2.6.0+ 的 `ctx.paths.data_dir`（`<模块根>/data/plugins/<插件id>/`）；
+        拿不到时回落到插件源码目录，兼容旧环境。`__init__` 阶段 ctx 尚未注入，
+        所以这里直接读私有字段而不是 `self.ctx` 属性。
+        """
+        ctx = getattr(self, "_ctx", None)
+        paths = getattr(ctx, "paths", None) if ctx is not None else None
+        data_dir = getattr(paths, "data_dir", None) if paths is not None else None
+        if data_dir:
+            try:
+                os.makedirs(str(data_dir), exist_ok=True)
+                return str(data_dir)
+            except Exception:
+                pass
+        return _plugin_dir()
+
+    def _persist_path(self, filename: str) -> str:
+        """返回数据文件的持久化路径；首次使用时把插件目录下的旧文件搬过来。"""
+        target_dir = self._data_dir()
+        target = os.path.join(target_dir, filename)
+        if target_dir != _plugin_dir() and not os.path.exists(target):
+            legacy = os.path.join(_plugin_dir(), filename)
+            if os.path.exists(legacy):
+                try:
+                    shutil.copy2(legacy, target)
+                except Exception:
+                    pass
+        return target
+
     def _state_path(self) -> str:
-        return os.path.join(_plugin_dir(), self.STATE_FILE)
+        return self._persist_path(self.STATE_FILE)
 
     def _load_state(self) -> dict[str, Any]:
         """读取持久化状态。__init__ 阶段调用，不能用 ctx.logger。"""
@@ -166,6 +203,21 @@ class Vw50SponsorPlugin(MaiBotPlugin):
             return False
         if not admins:
             return True
+        return str(user_id or "").strip() in admins
+
+    def _is_admin_strict(self, user_id: str) -> bool:
+        """严格管理员判定：admin_qq_ids 为空时拒绝所有人（fail-closed）。
+
+        赞助录入涉及真实金额，不能沿用"留空放行"的宽松策略。
+        """
+        try:
+            settings = self.config
+            admins = [str(x).strip() for x in (settings.plugin.admin_qq_ids or []) if str(x).strip()]
+        except Exception as exc:  # noqa: BLE001
+            self.ctx.logger.warning(f"[vw50] 管理员配置读取失败，拒绝执行: {exc}")
+            return False
+        if not admins:
+            return False
         return str(user_id or "").strip() in admins
 
     async def _deny_if_not_admin(self, kwargs: dict[str, Any]) -> Optional[tuple[bool, str, int]]:
@@ -367,17 +419,8 @@ class Vw50SponsorPlugin(MaiBotPlugin):
         except (TypeError, ValueError):
             attempt = 1
 
-        # 概率性选取一条历史语录作为参考
-        quote = self._pick_quote(settings)
-        quote_ref = ""
-        if quote:
-            quote_ref = (
-                "\n\n参考语录（来自群友历史疯狂星期四文案）：「" + quote + "」\n"
-                "你可以借鉴它的风格/结构进行改写，也可以原封不动地发出来，或从中找灵感。"
-            )
-
         # 武装 planner 注入：仅下一个匹配该 stream 的 planner 请求会被注入
-        self._armed[stream_id] = (time.time(), attempt, quote_ref)
+        self._armed[stream_id] = (time.time(), attempt)
         # 打开文案检测窗口：接下来一段时间内，该流命中「V我50/疯狂星期四」相关关键词
         # 即视为 vw50 自动流程完成（只判定文案，不依赖收款码）
         self._detect_until[stream_id] = time.time() + self._DETECT_WINDOW_SEC
@@ -401,7 +444,7 @@ class Vw50SponsorPlugin(MaiBotPlugin):
         self._state.setdefault("last_trigger", {})[stream_id] = time.time()
         self._save_state()
         self.ctx.logger.info(
-            f"[vw50] 已触发 vw50 流程 stream={stream_id} attempt={attempt} quote={'有' if quote else '无'}"
+            f"[vw50] 已触发 vw50 流程 stream={stream_id} attempt={attempt}"
         )
         return True
 
@@ -427,85 +470,92 @@ class Vw50SponsorPlugin(MaiBotPlugin):
             .replace("{platforms}", platforms_str)
         )
 
-    # ── 历史语录 ──────────────────────────────────────────────────────
+    # ── 赞助记录 ──────────────────────────────────────────────────────
 
-    @staticmethod
-    def _quotes_path() -> str:
-        return os.path.join(_plugin_dir(), "vw50_quotes.json")
+    def _sponsors_path(self) -> str:
+        return self._persist_path(self.SPONSORS_FILE)
 
-    def _load_quotes(self) -> list[str]:
+    def _load_sponsors(self) -> dict[str, Any]:
+        """读取赞助明细。结构：{"version": 1, "records": [...]}。"""
         try:
-            with open(self._quotes_path(), "r", encoding="utf-8") as f:
+            with open(self._sponsors_path(), "r", encoding="utf-8") as f:
                 data = json.load(f)
-            if isinstance(data, list):
-                return [str(x) for x in data if isinstance(x, str)]
+            if isinstance(data, dict) and isinstance(data.get("records"), list):
+                return data
         except Exception:
             pass
-        return []
+        return {"version": 1, "records": []}
 
-    def _save_quotes(self, quotes: list[str]) -> bool:
-        """落盘语录列表。成功返回 True。"""
+    def _save_sponsors(self, data: dict[str, Any]) -> bool:
+        """落盘赞助明细。成功返回 True。"""
         try:
-            with open(self._quotes_path(), "w", encoding="utf-8") as f:
-                json.dump(quotes, f, ensure_ascii=False, indent=2)
+            with open(self._sponsors_path(), "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
             return True
         except Exception as exc:  # noqa: BLE001
-            self.ctx.logger.warning(f"[vw50] 语录保存失败: {exc}")
+            self.ctx.logger.warning(f"[vw50] 赞助记录保存失败: {exc}")
             return False
 
-    def _add_quote(self, text: str, settings: Vw50Settings) -> None:
-        """把一条群友文案收录进语录库（去重、超限删最早）。"""
-        text = text.strip()
-        if not text:
-            return
-        quotes = self._load_quotes()
-        if text in quotes:
-            return
-        quotes.append(text)
-        max_count = max(1, int(settings.quotes.max_count))
-        if len(quotes) > max_count:
-            quotes = quotes[-max_count:]
-        self._save_quotes(quotes)
+    def _add_sponsor(
+        self,
+        record: dict[str, Any],
+        repeat_trigger_interval_sec: float = 0.0,
+    ) -> tuple[int, float, bool]:
+        """追加一条赞助明细。
 
-    def _pick_quote(self, settings: Vw50Settings) -> str:
-        """按概率随机选取一条历史语录，不命中返回空串。"""
-        if not settings.quotes.enabled:
-            return ""
-        try:
-            if random.random() >= float(settings.quotes.use_probability):
-                return ""
-        except Exception:  # noqa: BLE001
-            return ""
-        quotes = self._load_quotes()
-        if not quotes:
-            return ""
-        return random.choice(quotes)
+        同一人多次赞助按明细累加，不覆盖。
 
-    def _format_quotes_list(self, quotes: list[str], *, page: int = 1, page_size: int = 10) -> str:
-        """格式化语录列表（分页）。page 从 1 开始。"""
-        total = len(quotes)
-        if total == 0:
-            return "当前语录库为空。\n可用：/vw50_quote_add <文案> 手动添加"
-        page_size = max(1, min(page_size, 20))
-        total_pages = (total + page_size - 1) // page_size
-        page = max(1, min(page, total_pages))
-        start = (page - 1) * page_size
-        end = min(start + page_size, total)
-        lines = [f"【vw50 语录库】共 {total} 条 · 第 {page}/{total_pages} 页"]
-        for i in range(start, end):
-            text = quotes[i]
-            # 单条过长时截断展示，避免消息爆长
-            preview = text if len(text) <= 80 else text[:77] + "..."
-            lines.append(f"{i + 1}. {preview}")
-        lines.append("")
-        lines.append("命令：")
-        lines.append("/vw50_quotes [页码]  — 查看")
-        lines.append("/vw50_quote_add <文案>  — 添加")
-        lines.append("/vw50_quote_edit <序号> <新文案>  — 修改")
-        lines.append("/vw50_quote_del <序号>  — 删除")
-        if total_pages > 1:
-            lines.append(f"翻页：/vw50_quotes {min(page + 1, total_pages)}")
-        return "\n".join(lines)
+        Returns:
+            (该用户累计次数, 该用户累计金额, 是否因间隔过短而跳过本次发言触发)
+        """
+
+        data = self._load_sponsors()
+        records = data.setdefault("records", [])
+        user_id = str(record.get("user_id") or "")
+
+        # 先算"距上次录入"的间隔，再入库，否则会和本次自己比较
+        previous_ts = [
+            float(item.get("ts") or 0)
+            for item in records
+            if isinstance(item, dict) and str(item.get("user_id") or "") == user_id
+        ]
+        last_ts = max(previous_ts) if previous_ts else 0.0
+        too_soon = (
+            repeat_trigger_interval_sec > 0
+            and last_ts > 0
+            and (time.time() - last_ts) < repeat_trigger_interval_sec
+        )
+
+        records.append(record)
+        self._save_sponsors(data)
+
+        same_user = [
+            item
+            for item in records
+            if isinstance(item, dict) and str(item.get("user_id") or "") == user_id
+        ]
+        times = len(same_user)
+        total = round(sum(float(item.get("amount") or 0) for item in same_user), 2)
+        return times, total, too_soon
+
+    @staticmethod
+    def _render_sponsor_template(
+        template: str,
+        *,
+        name: str,
+        amount: float,
+        times: int,
+        total: float,
+    ) -> str:
+        """渲染赞助提示词模板（用 replace 而非 format，避免花括号问题）。"""
+
+        return (
+            str(template or "")
+            .replace("{name}", str(name))
+            .replace("{amount}", f"{amount:g}")
+            .replace("{times}", str(times))
+            .replace("{total}", f"{total:g}")
+        )
 
     # ── 收款码读取 ────────────────────────────────────────────────────
 
@@ -790,7 +840,7 @@ class Vw50SponsorPlugin(MaiBotPlugin):
         if not armed:
             # 该流未武装，放行不修改
             return {"action": "continue"}
-        armed_ts, armed_attempt, quote_ref = armed
+        armed_ts, armed_attempt = armed
         if (time.time() - armed_ts) > self._ARM_WINDOW_SEC:
             # 超出窗口，丢弃此次武装
             self._armed.pop(session_id, None)
@@ -800,7 +850,7 @@ class Vw50SponsorPlugin(MaiBotPlugin):
         except RuntimeError:
             return {"action": "continue"}
 
-        prompt = self._build_planner_prompt(settings, armed_attempt) + quote_ref
+        prompt = self._build_planner_prompt(settings, armed_attempt)
 
         items = kwargs.get("items")
         if isinstance(items, list):
@@ -827,36 +877,75 @@ class Vw50SponsorPlugin(MaiBotPlugin):
         )
         return {"action": "continue", "modified_kwargs": kwargs}
 
-    # ── Hook：向 replyer 注入文案质量要求 + 工具调用提醒 ─────────────
+    # ── Hook：向 replyer 注入写作要求（vw50 流程 / 赞助感谢）──────────
 
     @HookHandler("maisaka.replyer.before_request", mode=HookMode.BLOCKING)
     async def on_replyer_before_request(self, **kwargs: Any) -> dict[str, Any]:
-        """在 vw50 流程窗口内，向 replyer 的 extra_prompt 追加文案要求与工具调用提醒。
+        """向 replyer 的 extra_prompt 追加本轮必须满足的写作要求。
 
-        planner 决定说不说，replyer 才是真正生成消息文本的组件；在这里注入能
-        确保文案按你给的「网络抽象文案大师」模板生成，并提醒 replyer 调用工具发码。
-        同时把可用平台列表告诉 replyer，群友指定某个平台时 replyer 可在工具调用里传
-        对应 payment_platform。extra_prompt 是追加，不覆盖其他内容。
+        两条互不干扰的注入源：
+          1. 赞助感谢：命中本流待感谢记录时注入感谢脚本，保留到发送成功或超时
+             （replyer 内部重试时仍能拿到要求）；
+          2. vw50 周四流程：planner 注入后的一次性文案要求，用过即清。
+
+        replyer 才是真正生成消息文本的组件，所以两条要求都注入到这里；
+        extra_prompt 是追加语义，不覆盖其它插件的内容。
         """
         session_id = str(kwargs.get("session_id") or "")
-        replyer_until = self._replyer_armed.get(session_id, 0.0)
-        if not replyer_until:
-            return {"action": "continue"}
-        if time.time() > replyer_until or self._is_copy_sent(session_id):
-            self._replyer_armed.pop(session_id, None)
-            return {"action": "continue"}
         try:
             settings = self.config
         except RuntimeError:
-            self._replyer_armed.pop(session_id, None)
             return {"action": "continue"}
+
+        suffixes: list[str] = []
+
+        # ① 赞助感谢（独立于 vw50 流程）
+        sponsor_suffix = self._build_sponsor_replyer_suffix(session_id, settings)
+        if sponsor_suffix:
+            suffixes.append(sponsor_suffix)
+
+        # ② vw50 周四流程（一次性）
+        replyer_until = self._replyer_armed.get(session_id, 0.0)
+        if replyer_until:
+            if time.time() > replyer_until or self._is_copy_sent(session_id):
+                self._replyer_armed.pop(session_id, None)
+            else:
+                suffixes.append(self._build_vw50_replyer_suffix(settings))
+                self._replyer_armed.pop(session_id, None)
+
+        if not suffixes:
+            return {"action": "continue"}
+        kwargs["extra_prompt"] = (kwargs.get("extra_prompt") or "") + "".join(suffixes)
+        return {"action": "continue", "modified_kwargs": kwargs}
+
+    def _build_sponsor_replyer_suffix(self, session_id: str, settings: Vw50Settings) -> str:
+        """构造赞助感谢要求；没有待感谢记录或已超时返回空串。"""
+        pending = self._sponsor_pending.get(session_id)
+        if not pending:
+            return ""
+        if time.time() > float(pending.get("until") or 0):
+            self._sponsor_pending.pop(session_id, None)
+            return ""
+        # 标记已注入：真正发出（after_send sent=true）后才清理，保证 replyer 重试仍带要求
+        pending["injected"] = True
+        rendered = self._render_sponsor_template(
+            settings.sponsor.prompt_template,
+            name=str(pending.get("name") or ""),
+            amount=float(pending.get("amount") or 0),
+            times=int(pending.get("times") or 1),
+            total=float(pending.get("total") or 0),
+        )
+        return "\n" + rendered
+
+    def _build_vw50_replyer_suffix(self, settings: Vw50Settings) -> str:
+        """构造 vw50 周四流程的文案要求。"""
         platforms = self._available_platforms(settings)
         platforms_hint = (
             f"可选平台：{('、'.join(platforms))}（不传 payment_platform 则发默认码）。"
             if platforms
             else "（未配置任何收款码平台）"
         )
-        suffix = (
+        return (
             "\n【vw50 流程 · 文案要求】请你扮演「网络抽象文案大师」，"
             "生成一段「疯狂星期四」整活文案：越抽象越好；"
             "结尾必须出现「V我50」等类似转账50的核心诉求，转折要极其生硬（反差越大越好）；"
@@ -867,9 +956,6 @@ class Vw50SponsorPlugin(MaiBotPlugin):
             "请在工具调用里传对应 payment_platform 参数。\n"
             "务必发送，不要判断合不合适、不要沉默。"
         )
-        kwargs["extra_prompt"] = (kwargs.get("extra_prompt") or "") + suffix
-        self._replyer_armed.pop(session_id, None)
-        return {"action": "continue", "modified_kwargs": kwargs}
 
     # ── Hook：文案检测（触发窗口内命中关键词 = vw50 完成）────────────
 
@@ -887,6 +973,16 @@ class Vw50SponsorPlugin(MaiBotPlugin):
         stream_id = str(message.get("session_id") or "")
         if not stream_id:
             return
+
+        # 赞助感谢已成功发出：清理待感谢记录（replyer 重试期间会一直保留要求）
+        sponsor_pending = self._sponsor_pending.get(stream_id)
+        if sponsor_pending and sponsor_pending.get("injected"):
+            self._sponsor_pending.pop(stream_id, None)
+            self.ctx.logger.info(
+                f"[vw50] 赞助感谢已发出 stream={stream_id} name={sponsor_pending.get('name')} "
+                f"amount={sponsor_pending.get('amount')}"
+            )
+
         detect_until = self._detect_until.get(stream_id, 0.0)
         if not detect_until:
             return
@@ -914,41 +1010,6 @@ class Vw50SponsorPlugin(MaiBotPlugin):
                     f"[vw50] 文案检测命中 stream={stream_id} keyword={kw_str}"
                 )
                 break
-
-    # ── Hook：收录群友的疯狂星期四文案进语录库 ────────────────────────
-
-    @HookHandler("chat.receive.before_process", mode=HookMode.OBSERVE)
-    async def on_chat_receive(self, **kwargs: Any) -> None:
-        """入站消息：命中关键词且够长，则收录为历史语录。OBSERVE 只读。"""
-        try:
-            settings = self.config
-        except RuntimeError:
-            return
-        if not settings.quotes.enabled:
-            return
-        msg = kwargs.get("message")
-        if not isinstance(msg, dict):
-            return
-        text = str(msg.get("processed_plain_text") or "")
-        if not text:
-            raw = msg.get("raw_message")
-            if isinstance(raw, list):
-                text = "".join(
-                    str(seg.get("data", ""))
-                    for seg in raw
-                    if isinstance(seg, dict) and seg.get("type") == "text"
-                )
-        text = text.strip()
-        if len(text) < int(settings.quotes.min_length):
-            return
-        keywords = settings.quotes.match_keywords or []
-        text_lower = text.lower()
-        if not any(
-            keyword and keyword.lower() in text_lower
-            for keyword in (str(item).strip() for item in keywords)
-        ):
-            return
-        self._add_quote(text, settings)
 
     # ── Tool：模型 / 群友经 AI 调用发送收款码 ──────────────────────────
 
@@ -1069,7 +1130,7 @@ class Vw50SponsorPlugin(MaiBotPlugin):
             return denied
         stream_id = str(kwargs.get("stream_id", ""))
         self._ensure_today_state()
-        quotes_count = len(self._load_quotes())
+        sponsor_count = len(self._load_sponsors().get("records") or [])
         msg = (
             f"[插件状态]\n"
             f"日期: {self._state.get('date')}\n"
@@ -1077,152 +1138,150 @@ class Vw50SponsorPlugin(MaiBotPlugin):
             f"code_sent: {self._state.get('code_sent', {})}\n"
             f"attempt: {self._state.get('attempt', {})}\n"
             f"last_trigger: {self._state.get('last_trigger', {})}\n"
-            f"语录库: {quotes_count} 条（/vw50_quotes 查看）"
+            f"赞助记录: {sponsor_count} 条"
         )
         if stream_id:
             await self.ctx.send.text(msg, stream_id)
         return True, "已发送状态", 2
 
-    # ── Command：语录库管理 ──────────────────────────────────────────
+    # ── Command：赞助录入 ────────────────────────────────────────────
 
     @Command(
-        name="vw50_quotes",
-        pattern=r"^/vw50_quotes(?:\s+(?P<page>\d+))?\s*$",
-        description="查看 vw50 语录库（可带页码，默认第 1 页）。",
+        name="vw50",
+        pattern=r"^/vw50(?=\s|$)(?:\s+(?P<amount>\d+(?:\.\d{1,2})?))?(?:\s+@\S+)?\s*$",
+        description="录入群友赞助（格式：/vw50 金额 @成员），并让麦麦公开感谢。",
     )
-    async def cmd_vw50_quotes(self, **kwargs: Any) -> tuple[bool, str, int]:
-        denied = await self._deny_if_not_admin(kwargs)
-        if denied is not None:
-            return denied
-        stream_id = str(kwargs.get("stream_id", ""))
-        matched = kwargs.get("matched_groups") if isinstance(kwargs.get("matched_groups"), dict) else {}
-        page_raw = str(matched.get("page") or "1").strip() or "1"
-        try:
-            page = max(1, int(page_raw))
-        except ValueError:
-            page = 1
-        quotes = self._load_quotes()
-        msg = self._format_quotes_list(quotes, page=page)
-        if stream_id:
-            await self.ctx.send.text(msg, stream_id)
-        return True, f"已展示语录第 {page} 页", 2
+    async def cmd_vw50_sponsor(self, **kwargs: Any) -> tuple[bool, str, int]:
+        """管理员录入赞助：/vw50 金额 @成员。
 
-    @Command(
-        name="vw50_quote_add",
-        pattern=r"^/vw50_quote_add\s+(?P<text>.+)$",
-        description="手动添加一条 vw50 语录。",
-    )
-    async def cmd_vw50_quote_add(self, **kwargs: Any) -> tuple[bool, str, int]:
-        denied = await self._deny_if_not_admin(kwargs)
-        if denied is not None:
-            return denied
-        stream_id = str(kwargs.get("stream_id", ""))
-        matched = kwargs.get("matched_groups") if isinstance(kwargs.get("matched_groups"), dict) else {}
-        text = str(matched.get("text") or "").strip()
-        if not text:
+        消息被拦截（不进 AI 链），随后挂一次性感谢要求并主动触发一轮发言；
+        感谢话术由 replyer 在生成回复时拿到（见 on_replyer_before_request）。
+        """
+        stream_id = str(kwargs.get("stream_id") or "")
+        user_id = str(kwargs.get("user_id") or "")
+        group_id = str(kwargs.get("group_id") or "")
+
+        async def deny(message: str) -> tuple[bool, str, int]:
             if stream_id:
-                await self.ctx.send.text("用法：/vw50_quote_add <文案>", stream_id)
-            return False, "文案为空", 2
+                await self.ctx.send.text(message, stream_id)
+            return False, message, 2
+
+        # 赞助涉及真实金额：管理员列表为空时直接拒绝（fail-closed）
+        if not self._is_admin_strict(user_id):
+            return await deny("你不是插件管理员，无权使用此命令（请先在配置里填 admin_qq_ids）。")
+
         try:
             settings = self.config
-            max_count = max(1, int(settings.quotes.max_count))
-        except Exception:  # noqa: BLE001
-            max_count = 200
-        quotes = self._load_quotes()
-        if text in quotes:
-            if stream_id:
-                await self.ctx.send.text("该文案已在语录库中，未重复添加。", stream_id)
-            return True, "语录已存在", 2
-        quotes.append(text)
-        if len(quotes) > max_count:
-            quotes = quotes[-max_count:]
-        if not self._save_quotes(quotes):
-            if stream_id:
-                await self.ctx.send.text("保存失败，请查看日志。", stream_id)
-            return False, "保存失败", 2
-        if stream_id:
-            await self.ctx.send.text(f"已添加语录，当前共 {len(quotes)} 条。\n#{len(quotes)}: {text}", stream_id)
-        return True, "已添加语录", 2
+        except RuntimeError:
+            return await deny("插件配置未就绪。")
 
-    @Command(
-        name="vw50_quote_edit",
-        pattern=r"^/vw50_quote_edit\s+(?P<index>\d+)\s+(?P<text>.+)$",
-        description="修改指定序号的 vw50 语录。",
-    )
-    async def cmd_vw50_quote_edit(self, **kwargs: Any) -> tuple[bool, str, int]:
-        denied = await self._deny_if_not_admin(kwargs)
-        if denied is not None:
-            return denied
-        stream_id = str(kwargs.get("stream_id", ""))
-        matched = kwargs.get("matched_groups") if isinstance(kwargs.get("matched_groups"), dict) else {}
-        index_raw = str(matched.get("index") or "").strip()
-        text = str(matched.get("text") or "").strip()
-        if not index_raw or not text:
-            if stream_id:
-                await self.ctx.send.text("用法：/vw50_quote_edit <序号> <新文案>", stream_id)
-            return False, "参数不足", 2
-        try:
-            index = int(index_raw)
-        except ValueError:
-            if stream_id:
-                await self.ctx.send.text("序号必须是正整数。", stream_id)
-            return False, "序号非法", 2
-        quotes = self._load_quotes()
-        if index < 1 or index > len(quotes):
-            if stream_id:
-                await self.ctx.send.text(f"序号超出范围（当前共 {len(quotes)} 条）。", stream_id)
-            return False, "序号越界", 2
-        old = quotes[index - 1]
-        quotes[index - 1] = text
-        if not self._save_quotes(quotes):
-            if stream_id:
-                await self.ctx.send.text("保存失败，请查看日志。", stream_id)
-            return False, "保存失败", 2
-        if stream_id:
-            await self.ctx.send.text(
-                f"已修改第 {index} 条语录。\n原：{old}\n新：{text}",
-                stream_id,
-            )
-        return True, f"已修改语录 #{index}", 2
+        if not settings.sponsor.enabled:
+            return await deny("赞助录入功能已禁用。")
+        if settings.sponsor.group_only and not group_id:
+            return await deny("该指令只能在群聊中使用。")
+        if not stream_id:
+            return await deny("未获取到会话信息，无法录入。")
 
-    @Command(
-        name="vw50_quote_del",
-        pattern=r"^/vw50_quote_del\s+(?P<index>\d+)\s*$",
-        description="删除指定序号的 vw50 语录。",
-    )
-    async def cmd_vw50_quote_del(self, **kwargs: Any) -> tuple[bool, str, int]:
-        denied = await self._deny_if_not_admin(kwargs)
-        if denied is not None:
-            return denied
-        stream_id = str(kwargs.get("stream_id", ""))
         matched = kwargs.get("matched_groups") if isinstance(kwargs.get("matched_groups"), dict) else {}
-        index_raw = str(matched.get("index") or "").strip()
-        if not index_raw:
-            if stream_id:
-                await self.ctx.send.text("用法：/vw50_quote_del <序号>", stream_id)
-            return False, "参数不足", 2
+        amount_raw = str(matched.get("amount") or "").strip()
+        if not amount_raw:
+            return await deny("格式：/vw50 金额 @成员（例如 /vw50 50 @某人）")
         try:
-            index = int(index_raw)
+            amount = round(float(amount_raw), 2)
         except ValueError:
-            if stream_id:
-                await self.ctx.send.text("序号必须是正整数。", stream_id)
-            return False, "序号非法", 2
-        quotes = self._load_quotes()
-        if index < 1 or index > len(quotes):
-            if stream_id:
-                await self.ctx.send.text(f"序号超出范围（当前共 {len(quotes)} 条）。", stream_id)
-            return False, "序号越界", 2
-        removed = quotes.pop(index - 1)
-        if not self._save_quotes(quotes):
-            if stream_id:
-                await self.ctx.send.text("保存失败，请查看日志。", stream_id)
-            return False, "保存失败", 2
-        if stream_id:
-            await self.ctx.send.text(
-                f"已删除第 {index} 条语录（剩余 {len(quotes)} 条）。\n被删：{removed}",
-                stream_id,
+            return await deny("金额格式不正确。")
+        max_amount = float(settings.sponsor.max_amount)
+        if not (0 < amount <= max_amount):
+            return await deny(f"金额必须在 0 到 {max_amount:g} 元之间。")
+
+        target = self._extract_at_target(kwargs.get("message"))
+        if not target:
+            return await deny("请 @ 要录入的赞助人。")
+
+        record = {
+            "ts": time.time(),
+            "amount": amount,
+            "user_id": target["user_id"],
+            "name": target["name"],
+            "operator_id": user_id,
+            "group_id": group_id,
+            "stream_id": stream_id,
+            "message_id": str((kwargs.get("message") or {}).get("message_id") or ""),
+        }
+        times, total, too_soon = self._add_sponsor(
+            record,
+            repeat_trigger_interval_sec=float(settings.sponsor.repeat_trigger_interval_sec),
+        )
+
+        if too_soon:
+            return (
+                True,
+                f"已记录赞助：{target['name']} {amount:g} 元（第 {times} 次）；间隔过短，未重复触发发言",
+                2,
             )
-        return True, f"已删除语录 #{index}", 2
+
+        ttl = float(settings.sponsor.thanks_ttl_sec)
+        self._sponsor_pending[stream_id] = {
+            "name": target["name"],
+            "amount": amount,
+            "times": times,
+            "total": total,
+            "until": time.time() + ttl,
+            "injected": False,
+        }
+
+        intent = self._render_sponsor_template(
+            settings.sponsor.intent_template,
+            name=target["name"],
+            amount=amount,
+            times=times,
+            total=total,
+        )
+        try:
+            result = await self.ctx.maisaka.proactive.trigger(
+                stream_id=stream_id,
+                intent=intent,
+                reason=f"赞助录入：{target['name']} {amount:g} 元",
+            )
+            if isinstance(result, dict) and not result.get("success", True):
+                raise RuntimeError(str(result.get("error") or "主动任务入队失败"))
+        except Exception as exc:  # noqa: BLE001
+            self._sponsor_pending.pop(stream_id, None)
+            self.ctx.logger.error(f"[vw50] 赞助感谢主动触发失败: {exc}")
+            if stream_id:
+                await self.ctx.send.text(f"已记录赞助，但主动发言入队失败：{exc}", stream_id)
+            return False, "主动发言入队失败", 2
+
+        self.ctx.logger.info(
+            f"[vw50] 已录入赞助 stream={stream_id} user={target['user_id']} "
+            f"name={target['name']} amount={amount:g} times={times} total={total:g}"
+        )
+        return True, f"已记录赞助：{target['name']} {amount:g} 元（第 {times} 次）", 2
+
+    @staticmethod
+    def _extract_at_target(message: Any) -> Optional[dict[str, str]]:
+        """从序列化消息的 at 段取出被 @ 的用户。
+
+        MaiBot 1.3.8 的 at 段结构：
+        {"type": "at", "data": {"target_user_id", "target_user_nickname", "target_user_cardname"}}
+        显示名优先群名片，其次昵称，最后 QQ 号。
+        """
+        if not isinstance(message, dict):
+            return None
+        for seg in message.get("raw_message") or []:
+            if not isinstance(seg, dict) or seg.get("type") != "at":
+                continue
+            data = seg.get("data") if isinstance(seg.get("data"), dict) else {}
+            target_id = str(data.get("target_user_id") or "").strip()
+            if not target_id:
+                continue
+            name = (
+                data.get("target_user_cardname")
+                or data.get("target_user_nickname")
+                or target_id
+            )
+            return {"user_id": target_id, "name": str(name).strip() or target_id}
+        return None
 
 
 def create_plugin() -> MaiBotPlugin:
