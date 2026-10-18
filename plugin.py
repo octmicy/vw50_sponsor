@@ -188,37 +188,35 @@ class Vw50SponsorPlugin(MaiBotPlugin):
     def _is_copy_sent(self, stream_id: str) -> bool:
         return bool(self._state.get("copy_sent", {}).get(stream_id, False))
 
-    def _is_admin(self, user_id: str) -> bool:
-        """判断 user_id 是否为插件管理员。
-
-        规则：
-          - admin_qq_ids 为空 → 不校验（所有人放行，兼容旧配置）
-          - 否则 user_id 必须在 admin_qq_ids 列表中
-        """
+    def _admin_list(self) -> list[str]:
+        """返回配置里的管理员 QQ 号列表；读取失败返回空列表（视为未配置）。"""
         try:
             settings = self.config
-            admins = [str(x).strip() for x in (settings.plugin.admin_qq_ids or []) if str(x).strip()]
+            return [str(x).strip() for x in (settings.plugin.admin_qq_ids or []) if str(x).strip()]
         except Exception as exc:  # noqa: BLE001
             self.ctx.logger.warning(f"[vw50] 管理员配置读取失败，拒绝执行管理命令: {exc}")
-            return False
-        if not admins:
-            return True
-        return str(user_id or "").strip() in admins
+            return []
 
-    def _is_admin_strict(self, user_id: str) -> bool:
-        """严格管理员判定：admin_qq_ids 为空时拒绝所有人（fail-closed）。
+    def _is_admin(self, user_id: str) -> bool:
+        """判断 user_id 是否为插件管理员（fail-closed）。
 
-        赞助录入涉及真实金额，不能沿用"留空放行"的宽松策略。
+        `admin_qq_ids` 为空时**拒绝所有管理命令**。管理命令能录入赞助、读取插件
+        内部状态、手动触发 vw50 自动流程并让模型发出收款码，默认放行等于把
+        这些能力开放给群里任何人；「不填就是不校验」不是安全的默认值。
         """
-        try:
-            settings = self.config
-            admins = [str(x).strip() for x in (settings.plugin.admin_qq_ids or []) if str(x).strip()]
-        except Exception as exc:  # noqa: BLE001
-            self.ctx.logger.warning(f"[vw50] 管理员配置读取失败，拒绝执行: {exc}")
-            return False
+        admins = self._admin_list()
         if not admins:
             return False
         return str(user_id or "").strip() in admins
+
+    def _admin_denial_hint(self) -> str:
+        """管理员校验失败时给用户的提示语。"""
+        if not self._admin_list():
+            return (
+                "插件未配置管理员（config.toml 的 plugin.admin_qq_ids 为空），"
+                "所有管理命令均已拒绝；请让号主先填写管理员 QQ 号。"
+            )
+        return "你不是插件管理员，无权使用此命令。"
 
     async def _deny_if_not_admin(self, kwargs: dict[str, Any]) -> Optional[tuple[bool, str, int]]:
         """非管理员时发送提示并返回 Command 三元组；管理员返回 None。"""
@@ -226,9 +224,10 @@ class Vw50SponsorPlugin(MaiBotPlugin):
         if self._is_admin(user_id):
             return None
         stream_id = str(kwargs.get("stream_id") or "")
+        hint = self._admin_denial_hint()
         if stream_id:
-            await self.ctx.send.text("你不是插件管理员，无权使用此命令。", stream_id)
-        return False, "非管理员", 2
+            await self.ctx.send.text(hint, stream_id)
+        return False, hint, 2
 
     def _is_code_sent(self, stream_id: str) -> bool:
         """保留：仅在调试/手动查询场景使用。tool 不再调用此方法。"""
@@ -1166,9 +1165,9 @@ class Vw50SponsorPlugin(MaiBotPlugin):
                 await self.ctx.send.text(message, stream_id)
             return False, message, 2
 
-        # 赞助涉及真实金额：管理员列表为空时直接拒绝（fail-closed）
-        if not self._is_admin_strict(user_id):
-            return await deny("你不是插件管理员，无权使用此命令（请先在配置里填 admin_qq_ids）。")
+        # 赞助涉及真实金额：所有管理命令统一走 fail-closed 的管理员校验
+        if not self._is_admin(user_id):
+            return await deny(self._admin_denial_hint())
 
         try:
             settings = self.config

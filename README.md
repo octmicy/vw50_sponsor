@@ -25,12 +25,20 @@
 把整个 `vw50_sponsor` 文件夹放到 MaiBot 的插件目录 `<模块根>/plugins/vw50_sponsor/`（Windows OneKey 版为
 `%APPDATA%\MaiBotOneKeyDesktop\<实例哈希>\modules\MaiBot\plugins\`），重启 MaiBot 或在 WebUI 重载插件即可。
 
+> `config.toml` 不在仓库里（它是运行时的本地配置）。首次加载时 Runner 会按 `config_model`
+> 自动生成；也可以先把 `config.example.toml` 复制成 `config.toml` 再改。
+
 ## 配置
 
-编辑 `config.toml`，核心三步：
+配置由 MaiBot 的 Runner 依据 `plugin.py` 的 `config_model` 自动生成与维护，实际生效的是插件目录下的
+`config.toml`（**不在版本控制内**，见 `.gitignore`）。仓库里的 `config.example.toml` 只是字段说明模板，
+可复制一份改名为 `config.toml` 后再改，也可以直接在 WebUI 的插件配置页编辑。
+
+核心三步：
 
 1. **目标群**：在 `[target]` 的 `group_ids` 填上 QQ 群号，如 `group_ids = ["123456789", "987654321"]`。
-2. **管理员**：在 `[plugin]` 的 `admin_qq_ids` 填上你的 QQ 号，如 `admin_qq_ids = ["123456789"]`。只有管理员能用管理命令。
+2. **管理员**：在 `[plugin]` 的 `admin_qq_ids` 填上你的 QQ 号，如 `admin_qq_ids = ["123456789"]`。
+   **留空则所有管理命令一律拒绝**（fail-closed）。
 3. **收款码（WebUI 直接配置）**：把图片放进 `payment/` 目录，在“启用的收款平台”中多选平台，再用“默认收款平台”下拉框选择默认项。默认文件名为 `wechat.png`、`alipay.png`、`qq.png`，通常无需修改。
    - planner/replyer 会看到已配置的平台列表，群友指定某个平台时模型可传对应 `payment_platform` 参数。
 4. **总开关**：`[plugin] enabled = true`。
@@ -41,16 +49,16 @@
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `plugin.admin_qq_ids` | `[]` | 插件管理员 QQ 号列表；只有这些人能执行管理命令。留空=不校验（所有人都能用，不推荐） |
+| `plugin.admin_qq_ids` | `[]` | 插件管理员 QQ 号列表；**留空则所有管理命令一律拒绝**，必须填 |
 | `target.group_ids` | `[]` | 目标 QQ 群号列表，直接填群号 |
 | `schedule.target_weekday` | `3`（周四） | 0=周一 … 6=周日 |
 | `schedule.trigger_hour` | `11` | 到达该小时后才触发（系统本地时间） |
 | `schedule.retry_interval_min` | `30` | 未发送时重试间隔 |
-| `prompt.planner_prompt` | 见 config.toml | 注入给 planner 的「网络抽象文案大师」提示词模板（支持 `{campaign}`/`{attempt}`/`{platforms}`） |
+| `prompt.planner_prompt` | 见 config.example.toml | 注入给 planner 的「网络抽象文案大师」提示词模板（支持 `{campaign}`/`{attempt}`/`{platforms}`） |
 | `payments.enabled_platforms` | `[]` | WebUI 多选框：启用微信、支付宝、QQ 或自定义平台 |
 | `payments.default_platform` | `wechat` | WebUI 下拉框：未指定平台时发送哪个收款码 |
 | `payments.*_file` | `*.png` | 对应平台的图片或 Base64 文本文件名，默认从 `payment/` 目录读取 |
-| `payments.caption` | 见 config.toml | 所有平台共用的收款码附带文案，留空则只发图片 |
+| `payments.caption` | 见 config.example.toml | 所有平台共用的收款码附带文案，留空则只发图片 |
 | `sponsor.enabled` | `true` | 是否启用 `/vw50 金额 @成员` 赞助录入 |
 | `sponsor.max_amount` | `100000` | 单次赞助金额上限（元） |
 | `sponsor.group_only` | `false` | 是否仅允许群聊录入 |
@@ -143,6 +151,7 @@ caption = "这是麦麦的赞助/收款码，感谢你的支持~"
 | `/vw50_status` | 查看插件当日状态（含赞助记录条数） |
 
 > 以上管理命令均需在 `plugin.admin_qq_ids` 里配置的 QQ 号才能使用；非管理员会提示无权。
+> **管理员列表为空时所有管理命令一律拒绝**（fail-closed），不会退化成"不校验"。
 > **管理员列表为空时，赞助录入与其它管理命令一律拒绝**（fail-closed）。
 >
 > `/vw50_test` 在命令所在的会话里触发，不需要该群在 `group_ids` 里，方便随时测试。

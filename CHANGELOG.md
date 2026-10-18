@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.1.1] - 2026-10-19
+
+### 修复
+
+- **管理命令默认对所有人开放**：`admin_qq_ids` 默认为空时 `_is_admin()` 原先直接返回 `True`，
+  导致 `/vw50_test`（可手动触发 vw50 自动流程，并让模型经 `send_payment_code` 发出收款码）
+  与 `/vw50_status`（可读取 stream_id、attempt、赞助条数等内部状态）在开箱默认状态下对任意
+  群成员/私聊用户可用。现统一改为 **fail-closed**：管理员列表为空时所有管理命令一律拒绝，
+  并提示"插件未配置管理员"。`_is_admin_strict` 已合并进 `_is_admin`，不再存在两套判定。
+
+### 变更
+
+- **`config.toml` 不再纳入版本控制**：按官方文档
+  「插件源码仓库以 `config_model` 为配置定义，`.gitignore` 应包含 `/config.toml`」，
+  将 `/config.toml` 加入 `.gitignore` 并从版本控制中移除（`git rm --cached`）。
+- 新增 **`config.example.toml`** 作为仓库内的配置模板，含字段含义与管理员必填说明；
+  安装后实际生效的 `config.toml` 仍由 Runner 依据 `config_model` 自动生成与维护。
+
 ## [2.1.0] - 2026-10-18
 
 ### 新增

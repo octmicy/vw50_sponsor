@@ -1,20 +1,30 @@
-# 麦麦 vw50 赞助插件配置
+# 麦麦 vw50 赞助插件 —— 配置模板
 #
 # 「vw50」= 肯德基疯狂星期四「V我50」梗：每周四让群友V你50去吃肯德基。
 #
+# ⚠️ 本文件是**模板副本**，只用于查阅字段含义，不是实际生效的运行时配置。
+#    安装后的实际配置是插件目录下的 config.toml，由 Runner 依据 plugin.py 的
+#    config_model 自动生成并维护（config.toml 已在 .gitignore 中，不进版本控制）。
+#    你可以直接在 MaiBot WebUI 的插件配置页编辑，或把本文件复制一份改名为
+#    config.toml 后再修改。
+#
 # 快速上手：
-#   1. [plugin] admin_qq_ids 填上你的 QQ 号（管理命令权限）
+#   1. [plugin] admin_qq_ids 填上你的 QQ 号 —— **必须填**，留空则所有管理命令一律拒绝
 #   2. [target] 里填上要发文案的 QQ 群号（群号，不是 stream_id）
 #   3. 把收款码图片放进 payment/ 目录，然后在 [payments] 选择启用平台和默认平台
 #   4. [plugin] 里把 enabled 保持 true
 # 默认每周四 11:00 后自动触发；未发送则每 30 分钟重试一次直至发送成功。
+#
+# 完整字段说明见 config.py 与 README。
 
 [plugin]
 enabled = true                 # 总开关
-config_version = "2.0.0"       # 配置结构版本号（勿改）
+config_version = "2.0.0"       # 配置结构版本号，由 Runner 维护，勿手改
 # 插件管理员 QQ 号列表。只有这些人能执行管理命令：
 # /vw50 <金额> @成员（录入赞助） /vw50_test /vw50_status
-# 留空 = 管理命令一律拒绝（fail-closed，必须先配置）
+# ⚠️ 留空 = 所有管理命令一律拒绝（fail-closed）。默认放行会让任意群友触发
+#    赞助录入、读取插件内部状态，甚至手动触发 vw50 自动流程。
+# 例：admin_qq_ids = ["123456789", "987654321"]
 admin_qq_ids = []
 
 [schedule]

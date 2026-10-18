@@ -2,6 +2,11 @@ __pycache__/
 *.py[cod]
 logs/
 
+# 运行时配置：由 Runner 依据 config_model 自动生成并维护，不进版本控制
+# 依据：https://docs.mai-mai.org/plugin/config ——「插件源码仓库以 config_model 为配置定义，
+# .gitignore 应包含 /config.toml」；仓库内的模板是 config.example.toml。
+/config.toml
+
 # 运行期数据：可能包含群友 QQ 号与聊天原文，禁止提交
 vw50_state.json
 vw50_sponsors.json

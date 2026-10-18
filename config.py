@@ -83,10 +83,10 @@ class PluginOptions(PluginConfigBase):
     )
     admin_qq_ids: List[str] = Field(
         default_factory=list,
-        description="插件管理员 QQ 号列表。只有这些人能执行管理命令（赞助录入、测试、状态）。",
+        description="插件管理员 QQ 号列表。只有这些人能执行管理命令（赞助录入、测试、状态）；留空则全部拒绝。",
         json_schema_extra={
             "label": "管理员 QQ 号",
-            "hint": "填 QQ 号，如 [\"123456789\"]。留空则所有人都能执行管理命令（不推荐）。",
+            "hint": "必填，填 QQ 号，如 [\"123456789\"]。留空则所有管理命令一律拒绝（fail-closed）。",
             "order": 1,
         },
     )
