@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "id": "com.octmicy.vw50",
   "name": "麦麦vw50",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "description": "肯德基疯狂星期四「V我50」梗：每周四 11:00 后自动让麦麦生成 V我50 文案并附上收款码；未发送则每 30 分钟提醒一次直至发送；提供 send_payment_code 工具供群友主动索要收款码；支持管理员用 /vw50 金额 @成员 录入赞助并让麦麦公开感谢。目标群只需填 QQ 群号。",
   "author": {
     "name": "octmicy",

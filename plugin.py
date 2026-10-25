@@ -556,6 +556,84 @@ class Vw50SponsorPlugin(MaiBotPlugin):
             .replace("{total}", f"{total:g}")
         )
 
+    @staticmethod
+    def _aggregate_sponsors(records: list[Any]) -> list[dict[str, Any]]:
+        """把赞助明细按 user_id 聚合，按累计金额降序返回。
+
+        每条聚合结果含 user_id / name / times / total / last_ts / last_text。
+        """
+
+        buckets: dict[str, dict[str, Any]] = {}
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            user_id = str(record.get("user_id") or "").strip()
+            if not user_id:
+                continue
+            bucket = buckets.setdefault(
+                user_id,
+                {"user_id": user_id, "name": user_id, "times": 0, "total": 0.0, "last_ts": 0.0},
+            )
+            bucket["times"] += 1
+            bucket["total"] = round(float(bucket["total"]) + float(record.get("amount") or 0), 2)
+            ts = float(record.get("ts") or 0)
+            if ts >= float(bucket["last_ts"]):
+                bucket["last_ts"] = ts
+                bucket["name"] = str(record.get("name") or bucket["name"] or user_id)
+            elif not bucket["name"] or bucket["name"] == user_id:
+                bucket["name"] = str(record.get("name") or user_id)
+
+        items = list(buckets.values())
+        for item in items:
+            item["last_text"] = (
+                datetime.fromtimestamp(float(item["last_ts"])).strftime("%Y-%m-%d %H:%M")
+                if item["last_ts"]
+                else "未知"
+            )
+        items.sort(key=lambda x: (-float(x["total"]), -int(x["times"]), str(x["name"])))
+        return items
+
+    @staticmethod
+    def _match_sponsors(items: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+        """按 QQ 号或昵称匹配赞助人，返回候选列表（可能多人）。"""
+
+        raw = str(query or "").strip()
+        if not raw:
+            return []
+        lowered = raw.lower()
+
+        exact_id = [item for item in items if str(item["user_id"]) == raw]
+        if exact_id:
+            return exact_id
+
+        exact_name = [item for item in items if str(item["name"]).lower() == lowered]
+        if exact_name:
+            return exact_name
+
+        return [
+            item
+            for item in items
+            if lowered in str(item["name"]).lower() or raw in str(item["user_id"])
+        ]
+
+    @staticmethod
+    def _format_sponsor_overview(items: list[dict[str, Any]]) -> str:
+        """格式化赞助总览 + 金额排行榜（前 5）。"""
+
+        total_amount = round(sum(float(item["total"]) for item in items), 2)
+        total_times = sum(int(item["times"]) for item in items)
+        lines = [
+            f"赞助总览：{len(items)} 位赞助人，共 {total_times} 人次，累计 {total_amount:g} 元。"
+        ]
+        top = items[:5]
+        if top:
+            lines.append("金额最高的赞助人：")
+            for index, item in enumerate(top, start=1):
+                lines.append(
+                    f"{index}. {item['name']}：{item['times']} 次，共 {item['total']:g} 元"
+                )
+        return "\n".join(lines)
+
     # ── 收款码读取 ────────────────────────────────────────────────────
 
     @staticmethod
@@ -1089,6 +1167,81 @@ class Vw50SponsorPlugin(MaiBotPlugin):
             self.ctx.logger.info(f"[vw50] 工具已发送收款码 stream={stream_id}{tag}")
             return {"name": "send_payment_code", "content": "已发送麦麦的收款码"}
         return {"name": "send_payment_code", "content": "收款码发送未成功"}
+
+    # ── Tool：查询赞助人金额（供 planner 调用）────────────────────────
+
+    @Tool(
+        name="query_sponsor_amount",
+        description=(
+            "查询群友给麦麦的赞助记录。可按昵称或 QQ 号查询某人的累计赞助金额与次数；"
+            "不传 sponsor 时返回赞助总览与金额最高的前 5 位赞助人。"
+            "当群友问「我赞助了多少」「谁赞助最多」「一共收了多少赞助」时调用。"
+        ),
+        parameters={
+            "sponsor": {
+                "type": "string",
+                "description": "要查询的赞助人昵称或 QQ 号；留空则返回总览与排行榜。",
+            },
+        },
+    )
+    async def tool_query_sponsor_amount(self, **kwargs: Any) -> dict[str, Any]:
+        """LLM 工具：查询赞助人的累计赞助金额与排行榜。
+
+        数据来自赞助明细（同一人多条累加），按 user_id 聚合；
+        支持按 QQ 号精确匹配、昵称精确匹配、昵称/QQ 号子串匹配。
+        """
+        tool_name = "query_sponsor_amount"
+        try:
+            settings = self.config
+        except RuntimeError:
+            return {"name": tool_name, "content": "插件配置未就绪，无法查询赞助记录"}
+
+        if not settings.sponsor.query_tool_enabled:
+            return {"name": tool_name, "content": "赞助查询工具已被禁用"}
+
+        data = self._load_sponsors()
+        records = [item for item in (data.get("records") or []) if isinstance(item, dict)]
+        if not records:
+            return {"name": tool_name, "content": "目前还没有任何赞助记录。"}
+
+        items = self._aggregate_sponsors(records)
+        if not items:
+            return {"name": tool_name, "content": "赞助记录里没有可用的赞助人信息。"}
+
+        query = str(kwargs.get("sponsor") or "").strip()
+        if not query:
+            return {"name": tool_name, "content": self._format_sponsor_overview(items)}
+
+        matches = self._match_sponsors(items, query)
+        if not matches:
+            return {
+                "name": tool_name,
+                "content": f"没有找到与「{query}」匹配的赞助记录，可以换个昵称或直接给 QQ 号再查。",
+            }
+        if len(matches) > 1:
+            lines = [f"「{query}」匹配到 {len(matches)} 位赞助人，请用更精确的昵称或 QQ 号指定："]
+            for item in matches[:5]:
+                lines.append(
+                    f"- {item['name']}（QQ {item['user_id']}）：{item['times']} 次，共 {item['total']:g} 元"
+                )
+            return {"name": tool_name, "content": "\n".join(lines)}
+
+        item = matches[0]
+        rank = next(
+            (
+                index
+                for index, entry in enumerate(items, start=1)
+                if entry["user_id"] == item["user_id"]
+            ),
+            0,
+        )
+        lines = [
+            f"{item['name']} 累计赞助 {item['times']} 次，共 {item['total']:g} 元。",
+            f"最近一次赞助：{item['last_text']}",
+        ]
+        if rank:
+            lines.append(f"在全部 {len(items)} 位赞助人中按金额排第 {rank}。")
+        return {"name": tool_name, "content": "\n".join(lines)}
 
     # ── Command：手动测试 / 查看状态 ─────────────────────────────────
 

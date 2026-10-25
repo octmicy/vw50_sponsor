@@ -84,6 +84,7 @@ max_amount = 100000.0          # 单次金额上限（元）
 group_only = false             # 是否仅限群聊录入
 thanks_ttl_sec = 120.0         # 感谢注入有效期（秒），超时未发出则作废
 repeat_trigger_interval_sec = 60.0  # 同一人重复录入时，距上次触发不足该秒数则只记明细
+query_tool_enabled = true      # 是否给 planner 提供 query_sponsor_amount 查询工具
 # 注入给 replyer 的感谢要求，支持 {name}/{amount}/{times}/{total}
 prompt_template = """
 【本轮最高优先级 · 必须执行 · 不得省略】

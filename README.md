@@ -19,6 +19,7 @@
 - **收款码两种来源**：推荐把本地图片直接放进 `payment/`，也兼容把 Base64 存到独立 `.txt` 文件；不要把大字符串填进 config 或 WebUI。
 - **多平台收款码**：支持微信/支付宝/QQ/自定义平台，`send_payment_code` 工具可选 `payment_platform` 参数指定要哪种。
 - **收款码工具**：`send_payment_code` 既供自动流程调用，也可供群友经 AI 主动索要；文案完成判定与工具调用相互独立。
+- **赞助查询工具**：`query_sponsor_amount` 让 planner 按昵称/QQ 号查某人的累计赞助金额与次数，不传参数则返回总览与金额排行榜。
 
 ## 安装
 
@@ -64,6 +65,7 @@
 | `sponsor.group_only` | `false` | 是否仅允许群聊录入 |
 | `sponsor.thanks_ttl_sec` | `120` | 感谢注入有效期（秒） |
 | `sponsor.repeat_trigger_interval_sec` | `60` | 同一人重复录入的最小发言间隔（秒） |
+| `sponsor.query_tool_enabled` | `true` | 是否给 planner 提供 `query_sponsor_amount` 查询工具 |
 | `tool.enabled` | `true` | 收款码工具开关（需模型支持工具调用） |
 
 ### 关于群号解析
@@ -142,6 +144,20 @@ caption = "这是麦麦的赞助/收款码，感谢你的支持~"
 - 同一人 `sponsor.repeat_trigger_interval_sec` 秒内重复录入，只记明细不再触发发言，避免连刷。
 - 赞助明细保存在统一持久化目录的 `vw50_sponsors.json`（见下）。
 
+## 赞助查询工具
+
+插件向 planner 暴露一个工具 `query_sponsor_amount`（可用 `sponsor.query_tool_enabled` 关闭）：
+
+| 调用方式 | 返回 |
+|---|---|
+| `query_sponsor_amount(sponsor="群友甲")` | 该人的累计次数、累计金额、最近一次时间、按金额排名 |
+| `query_sponsor_amount(sponsor="123456789")` | 按 QQ 号精确查询 |
+| `query_sponsor_amount()` | 赞助总览（人数/人次/总额）+ 金额最高的前 5 位 |
+
+匹配顺序：QQ 号精确 → 昵称精确 → 昵称/QQ 号子串。子串命中多人时会列出候选，让模型用更精确的昵称或 QQ 号再查。
+
+数据来自 `vw50_sponsors.json` 的明细按 `user_id` 聚合，所以同一人多次赞助会被正确累加。
+
 ## 调试命令
 
 | 命令 | 作用 |
@@ -152,7 +168,6 @@ caption = "这是麦麦的赞助/收款码，感谢你的支持~"
 
 > 以上管理命令均需在 `plugin.admin_qq_ids` 里配置的 QQ 号才能使用；非管理员会提示无权。
 > **管理员列表为空时所有管理命令一律拒绝**（fail-closed），不会退化成"不校验"。
-> **管理员列表为空时，赞助录入与其它管理命令一律拒绝**（fail-closed）。
 >
 > `/vw50_test` 在命令所在的会话里触发，不需要该群在 `group_ids` 里，方便随时测试。
 

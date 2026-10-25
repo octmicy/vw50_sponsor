@@ -368,15 +368,20 @@ class SponsorConfig(PluginConfigBase):
         description="同一人重复录入时，距离上次触发发言不足该秒数则只记明细、不再触发发言。",
         json_schema_extra={"label": "重复录入发言间隔（秒）", "hint": "避免同一人连刷导致连续感谢刷屏；0=每次都触发。", "order": 4, "step": 1},
     )
+    query_tool_enabled: bool = Field(
+        default=True,
+        description="是否向 planner 提供 query_sponsor_amount 工具（查询赞助人累计金额与排行榜）。",
+        json_schema_extra={"label": "启用赞助查询工具", "order": 5},
+    )
     prompt_template: str = Field(
         default=DEFAULT_SPONSOR_PROMPT,
         description="注入给 replyer 的感谢要求模板，支持 {name}/{amount}/{times}/{total} 占位符。",
-        json_schema_extra={"label": "Replyer 感谢提示词", "input_type": "textarea", "order": 5},
+        json_schema_extra={"label": "Replyer 感谢提示词", "input_type": "textarea", "order": 6},
     )
     intent_template: str = Field(
         default=DEFAULT_SPONSOR_INTENT,
         description="proactive.trigger 的 intent 模板，支持 {name}/{amount}/{times}/{total} 占位符。",
-        json_schema_extra={"label": "主动触发 intent", "input_type": "textarea", "order": 6},
+        json_schema_extra={"label": "主动触发 intent", "input_type": "textarea", "order": 7},
     )
 
 
