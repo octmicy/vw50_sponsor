@@ -617,21 +617,30 @@ class Vw50SponsorPlugin(MaiBotPlugin):
         ]
 
     @staticmethod
-    def _format_sponsor_overview(items: list[dict[str, Any]]) -> str:
-        """格式化赞助总览 + 金额排行榜（前 5）。"""
+    def _format_sponsor_overview(
+        items: list[dict[str, Any]],
+        *,
+        include_ranking: bool = False,
+    ) -> str:
+        """格式化赞助总览。
+
+        `include_ranking=False`（默认）只给汇总，不列任何人的金额——赞助金额属于
+        敏感信息，默认不对外展示他人明细。
+        """
 
         total_amount = round(sum(float(item["total"]) for item in items), 2)
         total_times = sum(int(item["times"]) for item in items)
         lines = [
             f"赞助总览：{len(items)} 位赞助人，共 {total_times} 人次，累计 {total_amount:g} 元。"
         ]
-        top = items[:5]
-        if top:
-            lines.append("金额最高的赞助人：")
-            for index, item in enumerate(top, start=1):
-                lines.append(
-                    f"{index}. {item['name']}：{item['times']} 次，共 {item['total']:g} 元"
-                )
+        if include_ranking:
+            top = items[:5]
+            if top:
+                lines.append("金额最高的赞助人：")
+                for index, item in enumerate(top, start=1):
+                    lines.append(
+                        f"{index}. {item['name']}：{item['times']} 次，共 {item['total']:g} 元"
+                    )
         return "\n".join(lines)
 
     # ── 收款码读取 ────────────────────────────────────────────────────
@@ -1173,22 +1182,27 @@ class Vw50SponsorPlugin(MaiBotPlugin):
     @Tool(
         name="query_sponsor_amount",
         description=(
-            "查询群友给麦麦的赞助记录。可按昵称或 QQ 号查询某人的累计赞助金额与次数；"
-            "不传 sponsor 时返回赞助总览与金额最高的前 5 位赞助人。"
-            "当群友问「我赞助了多少」「谁赞助最多」「一共收了多少赞助」时调用。"
+            "查询赞助记录。**赞助金额属于敏感信息，默认不要主动透露，也不要主动查询或公布别人的金额。**"
+            "只能查询「调用者自己」的累计赞助次数与金额（系统会按调用者 QQ 号校验，查别人会返回不便透露）；"
+            "不传 sponsor 时只返回整体汇总（人数/人次/总额）与调用者自己的记录，不含他人明细。"
+            "当群友问「我赞助了多少」「我赞助过几次」时调用；"
+            "当群友问别人赞助了多少或谁赞助最多时，委婉说明金额属于隐私、不方便透露。"
         ),
         parameters={
             "sponsor": {
                 "type": "string",
-                "description": "要查询的赞助人昵称或 QQ 号；留空则返回总览与排行榜。",
+                "description": "要查询的赞助人昵称或 QQ 号；留空则返回整体汇总与自己（调用者）的记录。",
             },
         },
     )
     async def tool_query_sponsor_amount(self, **kwargs: Any) -> dict[str, Any]:
-        """LLM 工具：查询赞助人的累计赞助金额与排行榜。
+        """LLM 工具：查询赞助记录（仅允许查自己）。
 
-        数据来自赞助明细（同一人多条累加），按 user_id 聚合；
-        支持按 QQ 号精确匹配、昵称精确匹配、昵称/QQ 号子串匹配。
+        隐私策略：
+          - 金额属于敏感信息，只返回调用者本人的明细；
+          - 不带参数时只给整体汇总（人数/人次/总额）与自己的记录，不列他人金额；
+          - 查询目标不是调用者本人时，返回「不便透露」而不是数据；
+          - 匹配到多人时只列昵称，不列金额，也不泄露他人 QQ 号。
         """
         tool_name = "query_sponsor_amount"
         try:
@@ -1208,9 +1222,29 @@ class Vw50SponsorPlugin(MaiBotPlugin):
         if not items:
             return {"name": tool_name, "content": "赞助记录里没有可用的赞助人信息。"}
 
+        caller_id = str(kwargs.get("user_id") or "").strip()
         query = str(kwargs.get("sponsor") or "").strip()
+
+        # 不带参数：只给汇总 + 自己的记录，避免变成公开排行榜
         if not query:
-            return {"name": tool_name, "content": self._format_sponsor_overview(items)}
+            lines = [self._format_sponsor_overview(items)]
+            mine = next((item for item in items if item["user_id"] == caller_id), None)
+            if mine:
+                lines.append(
+                    f"你（{mine['name']}）累计赞助 {mine['times']} 次，共 {mine['total']:g} 元。"
+                )
+            elif caller_id:
+                lines.append("你还没有赞助记录。")
+            else:
+                lines.append("未能确认调用者身份，个人记录不展示。")
+            return {"name": tool_name, "content": "\n".join(lines)}
+
+        # 没有调用者身份时无法判断归属，只说明规则，不返回任何明细
+        if not caller_id:
+            return {
+                "name": tool_name,
+                "content": "无法确认调用者身份，出于隐私考虑不提供赞助金额查询。",
+            }
 
         matches = self._match_sponsors(items, query)
         if not matches:
@@ -1219,14 +1253,26 @@ class Vw50SponsorPlugin(MaiBotPlugin):
                 "content": f"没有找到与「{query}」匹配的赞助记录，可以换个昵称或直接给 QQ 号再查。",
             }
         if len(matches) > 1:
-            lines = [f"「{query}」匹配到 {len(matches)} 位赞助人，请用更精确的昵称或 QQ 号指定："]
-            for item in matches[:5]:
-                lines.append(
-                    f"- {item['name']}（QQ {item['user_id']}）：{item['times']} 次，共 {item['total']:g} 元"
-                )
-            return {"name": tool_name, "content": "\n".join(lines)}
+            names = "、".join(str(item["name"]) for item in matches[:5])
+            return {
+                "name": tool_name,
+                "content": (
+                    f"「{query}」匹配到 {len(matches)} 位赞助人（{names}）。"
+                    "赞助金额属于隐私，这里不展示各人的金额；"
+                    "如果是查你自己，请用你自己的 QQ 号再查一次。"
+                ),
+            }
 
         item = matches[0]
+        if item["user_id"] != caller_id:
+            return {
+                "name": tool_name,
+                "content": (
+                    f"{item['name']} 的赞助金额属于隐私信息，不方便透露。"
+                    "如果需要，可以让当事人自己来问，或让号主查看赞助记录。"
+                ),
+            }
+
         rank = next(
             (
                 index
@@ -1236,11 +1282,12 @@ class Vw50SponsorPlugin(MaiBotPlugin):
             0,
         )
         lines = [
-            f"{item['name']} 累计赞助 {item['times']} 次，共 {item['total']:g} 元。",
+            f"你（{item['name']}）累计赞助 {item['times']} 次，共 {item['total']:g} 元。",
             f"最近一次赞助：{item['last_text']}",
         ]
         if rank:
             lines.append(f"在全部 {len(items)} 位赞助人中按金额排第 {rank}。")
+        lines.append("（金额属于隐私，除本人外不要转述给其他人。）")
         return {"name": tool_name, "content": "\n".join(lines)}
 
     # ── Command：手动测试 / 查看状态 ─────────────────────────────────

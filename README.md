@@ -19,7 +19,7 @@
 - **收款码两种来源**：推荐把本地图片直接放进 `payment/`，也兼容把 Base64 存到独立 `.txt` 文件；不要把大字符串填进 config 或 WebUI。
 - **多平台收款码**：支持微信/支付宝/QQ/自定义平台，`send_payment_code` 工具可选 `payment_platform` 参数指定要哪种。
 - **收款码工具**：`send_payment_code` 既供自动流程调用，也可供群友经 AI 主动索要；文案完成判定与工具调用相互独立。
-- **赞助查询工具**：`query_sponsor_amount` 让 planner 按昵称/QQ 号查某人的累计赞助金额与次数，不传参数则返回总览与金额排行榜。
+- **赞助查询工具**：`query_sponsor_amount` 让 planner 查**调用者本人**的累计赞助金额与次数；金额视为敏感信息，查别人会返回"不方便透露"。
 
 ## 安装
 
@@ -146,17 +146,23 @@ caption = "这是麦麦的赞助/收款码，感谢你的支持~"
 
 ## 赞助查询工具
 
-插件向 planner 暴露一个工具 `query_sponsor_amount`（可用 `sponsor.query_tool_enabled` 关闭）：
+插件向 planner 暴露一个工具 `query_sponsor_amount`（可用 `sponsor.query_tool_enabled` 关闭）。
+
+⚠️ **赞助金额属于敏感信息**：工具只允许查询**调用者本人**的记录，查别人一律返回"不方便透露"；
+不带参数时只给整体汇总（人数 / 人次 / 总额）和调用者自己那一条，**不提供公开排行榜**。
 
 | 调用方式 | 返回 |
 |---|---|
-| `query_sponsor_amount(sponsor="群友甲")` | 该人的累计次数、累计金额、最近一次时间、按金额排名 |
-| `query_sponsor_amount(sponsor="123456789")` | 按 QQ 号精确查询 |
-| `query_sponsor_amount()` | 赞助总览（人数/人次/总额）+ 金额最高的前 5 位 |
+| `query_sponsor_amount(sponsor="我自己的昵称或 QQ")` | 本人的累计次数、累计金额、最近一次时间、按金额排名 |
+| `query_sponsor_amount(sponsor="别人")` | 「该赞助人的赞助金额属于隐私信息，不方便透露」 |
+| `query_sponsor_amount()` | 整体汇总 + 自己那一条记录 |
 
-匹配顺序：QQ 号精确 → 昵称精确 → 昵称/QQ 号子串。子串命中多人时会列出候选，让模型用更精确的昵称或 QQ 号再查。
+实现要点：
 
-数据来自 `vw50_sponsors.json` 的明细按 `user_id` 聚合，所以同一人多次赞助会被正确累加。
+- 调用者身份取自工具执行上下文里的 `user_id`（优先是本轮触发消息的发送者）；拿不到时直接拒绝，不返回任何明细。
+- 匹配顺序：QQ 号精确 → 昵称精确 → 昵称/QQ 号子串；命中多人时**只列昵称、不列金额**，也不泄露他人 QQ 号。
+- 数据来自 `vw50_sponsors.json` 的明细按 `user_id` 聚合，所以同一人多次赞助会被正确累加。
+- 工具描述里已写入隐私约束，模型在群聊里被问到别人的金额时会委婉拒绝，而不是编造数字。
 
 ## 调试命令
 
